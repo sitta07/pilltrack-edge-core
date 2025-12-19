@@ -17,3 +17,4 @@ requests
 loguru             
 pydantic            
 onnxruntime
+faiss-cpu

@@ -9,6 +9,7 @@ PILLTRACK – SENIOR EDITION (FULLY OPTIMIZED - NO LAG)
 
 import os
 import re
+import faiss
 import time
 import threading
 import yaml
@@ -207,7 +208,6 @@ class AIProcessor:
         self.running = True
 
     def load_db(self):
-        """Load database of pill fingerprints"""
         if not os.path.exists(CFG.DB_PACKS_VEC):
             print("⚠️ Database not found!")
             return
@@ -215,20 +215,28 @@ class AIProcessor:
         with open(CFG.DB_PACKS_VEC, 'rb') as f:
             raw = pickle.load(f)
         
+        vectors = []
         for name, data in raw.items():
             dino_list = data.get('dino', []) if isinstance(data, dict) else data
             sift_list = data.get('sift', []) if isinstance(data, dict) else []
             self.db_sift_map[name] = sift_list[:CFG.SIFT_TOP_K]
             
             for vec in dino_list:
-                self.db_vectors.append(np.array(vec))
+                vectors.append(np.array(vec))
                 self.db_names.append(name)
         
-        self.db_vectors = np.array(self.db_vectors, dtype=np.float32)
-        norms = np.linalg.norm(self.db_vectors, axis=1, keepdims=True)
-        self.db_vectors = self.db_vectors / (norms + 1e-8)
+        vectors = np.array(vectors, dtype=np.float32)
+        # Normalize vectors สำหรับ Cosine Similarity
+        faiss.normalize_L2(vectors)
         
-        print(f"✅ Loaded {len(self.db_vectors)} database vectors")
+        # --- [NEW: FAISS INDEX SETUP] ---
+        dim = vectors.shape[1]
+        # ใช้ IndexFlatIP (Inner Product) เพราะเรา Normalize แล้ว จะได้ค่าเดียวกับ Cosine Similarity
+        self.index = faiss.IndexFlatIP(dim)
+        self.index.add(vectors)
+        # --------------------------------
+        
+        print(f"✅ FAISS Index Built: {len(vectors)} vectors")
 
     def get_sift_score(self, query_des: Optional[np.ndarray], 
                        target_des_list: List[np.ndarray]) -> float:
@@ -307,13 +315,15 @@ class AIProcessor:
         # Process crops
         if crops:
             batch_dino = self.engine.extract_dino_batch(crops)
-            sim_matrix = np.dot(batch_dino, self.db_vectors.T)
+            
+            # --- [NEW: FAISS SEARCH] ---
+            # ค้นหา Top-K ที่ใกล้ที่สุดสำหรับทุก Crop ใน Batch เดียว
+            scores, indices = self.index.search(batch_dino, k=CFG.DINO_TOP_K)
             
             for i, crop in enumerate(crops):
-                sim_scores = sim_matrix[i]
-                
-                top_k_indices = np.argpartition(sim_scores, -CFG.DINO_TOP_K)[-CFG.DINO_TOP_K:]
-                top_k_indices = top_k_indices[np.argsort(sim_scores[top_k_indices])[::-1]]
+                # scores[i] คือค่า Similarity, indices[i] คือตำแหน่งใน db_names
+                sim_scores = scores[i]
+                top_k_indices = indices[i]
                 
                 q_des = self.engine.extract_sift(crop)
                 
@@ -321,14 +331,15 @@ class AIProcessor:
                 max_fusion = 0.0
                 seen_names = set()
                 
-                for idx in top_k_indices:
-                    name = self.db_names[idx]
+                for idx_in_top_k, db_idx in enumerate(top_k_indices):
+                    # FAISS คืนค่า -1 ถ้าหาไม่เจอ
+                    if db_idx == -1: continue
                     
-                    if name in seen_names:
-                        continue
+                    name = self.db_names[db_idx]
+                    if name in seen_names: continue
                     seen_names.add(name)
                     
-                    dino_score = sim_scores[idx]
+                    dino_score = sim_scores[idx_in_top_k]
                     
                     if dino_score < CFG.MIN_DINO_SCORE:
                         continue
@@ -339,7 +350,7 @@ class AIProcessor:
                     if fusion_score > max_fusion:
                         max_fusion = fusion_score
                         best_label = name
-                
+            
                 temp_results.append({
                     'box': box_coords[i],
                     'label': best_label,
