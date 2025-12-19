@@ -1,0 +1,22 @@
+# --- Core AI Frameworks ---
+# PyTorch for ARM64 (CPU only is fine for Pi)
+torch>=2.0.0
+torchvision>=0.15.0
+
+# YOLOv8
+ultralytics>=8.0.0
+
+# ONNX Runtime (แนะนำให้ลง เพราะเราจะใช้ .onnx เพื่อความลื่น)
+onnxruntime
+
+# --- Image Processing ---
+# Numpy version < 2.0 is critical (v2.0 breaks many libs currently)
+numpy<2.0.0
+pillow>=9.0.0
+
+# OpenCV (Usually better installed via conda-forge, but listing here just in case)
+opencv-python>=4.8.0
+
+# --- Hardware / Raspberry Pi ---
+# Picamera2 สำหรับคุมกล้อง (เฉพาะบน Pi OS Bullseye/Bookworm)
+picamera2
