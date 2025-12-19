@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-PILLTRACK – HYBRID ENGINE (OPTIMIZED BATCH + MATRIX)
+PILLTRACK – HYBRID ENGINE (OPTIMIZED BATCH + MATRIX + 10FPS DISPLAY)
 ✔ Detailed Console Logs (Human Readable)
 ✔ RGB8888 END-TO-END
 ✔ Checklist UI
 ✔ Batch Inference & Vectorized Search
+✔ Low CPU Usage on Display
 """
 
 import os
@@ -19,7 +20,7 @@ import cv2
 import torch
 import torch.nn.functional as F
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field # <--- เพิ่ม field
 from typing import Tuple, List, Dict
 from ultralytics import YOLO
 from sync_manager import SyncManager
@@ -45,9 +46,9 @@ class Config:
     W_SIFT: float = 0.4
     SIFT_SATURATION: int = 400
     
-    # Preprocessing constants
-    MEAN: np.ndarray = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    STD: np.ndarray = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    # Preprocessing constants (Fixed with default_factory)
+    MEAN: np.ndarray = field(default_factory=lambda: np.array([0.485, 0.456, 0.406], dtype=np.float32))
+    STD: np.ndarray = field(default_factory=lambda: np.array([0.229, 0.224, 0.225], dtype=np.float32))
 
 CFG = Config()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -206,7 +207,7 @@ class AIProcessor:
     def process(self, frame):
         t0 = time.time()
         
-        # 1. YOLO Inference (Resize handled internally mostly, but explicit is safe)
+        # 1. YOLO Inference
         img_resized = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE))
         res = self.yolo(img_resized, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
 
@@ -216,7 +217,6 @@ class AIProcessor:
 
         # 2. Collect Crops (Batch Preparation)
         crops = []
-        valid_boxes = []
         
         sx = CFG.DISPLAY_SIZE[0]/CFG.AI_SIZE
         sy = CFG.DISPLAY_SIZE[1]/CFG.AI_SIZE
@@ -234,21 +234,17 @@ class AIProcessor:
             if crop.size == 0 or crop.shape[0] < 10 or crop.shape[1] < 10: continue
             
             crops.append(crop)
-            valid_boxes.append((rx1, ry1, rx2, ry2))
 
         if not crops: return
 
         # 3. DINO Batch Inference (Run ONCE for all pills)
-        # Returns Matrix (Num_Pills, 768)
         batch_dino_vecs = self.engine.extract_dino_batch(crops)
 
         # 4. Matrix Similarity Search (Vectorized)
-        # (Num_Pills, 768) @ (DB_Size, 768).T = (Num_Pills, DB_Size)
         similarity_matrix = np.dot(batch_dino_vecs, self.db_vectors.T)
 
         # Loop through each detected pill
         for i, crop in enumerate(crops):
-            q_vec = batch_dino_vecs[i]
             sim_scores = similarity_matrix[i]
             
             # Get Top 5 candidates indices
@@ -287,9 +283,6 @@ class AIProcessor:
             # --- LOGGING & DECISION ---
             if best_final_score > 0.60:
                 self.rx.verify(best_label)
-                
-                # Visualize (Optional - minimal drawing here to save time)
-                # Drawing handled by UI mostly, but we can log
                 
                 current_time = time.time()
                 if (current_time - self.last_log_time > 1.0) and (best_final_score > 0.65):
@@ -356,7 +349,7 @@ def draw_ui(frame, rx):
             cv2.line(frame, (x, y-8), (x+tw, y-8), (0,255,0), 2)
         y += 28
 
-# ================= 🚀 MAIN (OPTIMIZED DISPLAY) =================
+# ================= 🚀 MAIN =================
 if __name__ == "__main__":
     try:
         SyncManager().sync()
@@ -370,7 +363,7 @@ if __name__ == "__main__":
     cv2.resizeWindow("PillTrack", *CFG.DISPLAY_SIZE)
 
     print("🚀 System Started (Hybrid Engine). Display @ 10 FPS. Press 'q' to exit.")
-
+    
     # --- ⚙️ CONFIG FPS ---
     DISPLAY_FPS = 10
     display_interval = 1.0 / DISPLAY_FPS
@@ -380,33 +373,29 @@ if __name__ == "__main__":
         frame = cam.get()
         if frame is None: continue
 
-        # 1. ส่งภาพให้ AI ประมวลผล (ทำทุกเฟรม เพื่อความแม่นยำสูงสุด)
-        #    AI Thread จะหยิบไปใช้เองเมื่อมันว่าง
+        # 1. Thread-safe update for AI (Runs at Full Speed)
         with ai.lock:
             ai.latest = frame
         
-        # 2. ควบคุมการแสดงผลให้เหลือแค่ 10 FPS (ประหยัดพลังงาน Pi)
+        # 2. Display Loop (Runs at 10 FPS)
         current_time = time.time()
         if current_time - last_display_time > display_interval:
             
-            # Draw UI เฉพาะตอนที่จะแสดงผลเท่านั้น (ลด workload CPU)
+            # Create display copy only when needed
             display_frame = frame.copy()
             draw_ui(display_frame, ai.rx)
             
-            # โชว์ข้อมูล debug
             cv2.putText(display_frame, f"AI: {ai.ms:.1f}ms", (10, 20), FONT, 0.5, (0,255,255), 1)
             cv2.putText(display_frame, f"Disp: 10FPS", (10, 40), FONT, 0.5, (200,200,200), 1)
             
             cv2.imshow("PillTrack", display_frame)
             
-            # อัปเดตเวลาล่าสุด
             last_display_time = current_time
             
-            # เช็คปุ่มกดเฉพาะตอนแสดงผล (1ms)
             if cv2.waitKey(1) == ord('q'):
                 break
-        
         else:
-            time.sleep(0.001) 
+            # Yield CPU
+            time.sleep(0.001)
             
     cv2.destroyAllWindows()
