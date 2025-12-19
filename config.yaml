@@ -4,7 +4,7 @@
 
 # --- 📦 Artifacts: ไฟล์สำคัญที่ต้อง Sync ขึ้น S3 ---
 artifacts:
-  model: "models/seg_best_process_openvino_model/"      # YOLOv8 weights สำหรับ Segmentation
+  model: "models/seg_best_process.pt"      # YOLOv8 weights สำหรับ Segmentation
   pack_vec: "database/pill_fingerprints.pkl" # [แก้แล้ว] ชื่อไฟล์ใหม่ที่มีทั้ง DINO และ SIFT ข้างใน
   drug_list: "database/drug_list.json"     # Metadata รายชื่อยา
 
@@ -17,7 +17,7 @@ paths:
 # --- ⚙️ Settings: จูนค่า AI ---
 settings:
   dino_size: 448                           # ขนาด Input DINO (ถ้า Pi ช้า ลดเหลือ 224 ได้)
-  yolo_conf: 0.1                          # ความมั่นใจขั้นต่ำของ YOLO
+  yolo_conf: 0.25                          # ความมั่นใจขั้นต่ำของ YOLO
   
   # [NEW] Hybrid Engine Weights (รวมกันต้องได้ 1.0)
   w_dino: 0.70                             # ให้ความสำคัญกับรูปลักษณ์รวม (DINO) 70%
