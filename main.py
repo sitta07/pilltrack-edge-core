@@ -21,9 +21,8 @@ from dataclasses import dataclass, field
 from typing import Tuple, List, Dict, Optional
 from ultralytics import YOLO
 from collections import deque
-import torch
+import onnxruntime as ort
 
-torch.set_num_threads(1)  # บังคับใช้ Core เดียว (ลด Overhead การสลับงาน)
 # --- IMPORT MODULES ---
 from his_connector import HISConnector
 
@@ -178,14 +177,20 @@ def draw_text(img, text, pos, scale=0.5, color=(255,255,255,255), thickness=1):
     cv2.putText(img, text, pos, FONT, scale, black, thickness+2)
     cv2.putText(img, text, pos, FONT, scale, color, thickness)
 
-# ================= 🔍 FEATURE ENGINE =================
 class FeatureEngine:
     def __init__(self):
-        print("⏳ Loading DINOv2...")
-        self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
-        self.model.eval().to(device)
-        if device.type == 'cuda': self.model = self.model.half()
+        print("⏳ Loading DINOv2 (ONNX Runtime)...")
+        # ใช้ ONNX แทน PyTorch!
+        # providers=['CPUExecutionProvider'] คือรันบน CPU แต่เร็วกว่ามาก
+        try:
+            self.sess = ort.InferenceSession("dinov2_vits14.onnx", providers=['CPUExecutionProvider'])
+        except Exception as e:
+            print(f"❌ Error loading ONNX: {e}")
+            print("💡 Did you run 'export_dino.py' yet?")
+            raise e
+            
         self.sift = cv2.SIFT_create(nfeatures=500)
+        self.input_name = self.sess.get_inputs()[0].name
         
     def preprocess_batch(self, crop_list: List[np.ndarray]) -> np.ndarray:
         batch = np.zeros((len(crop_list), 3, 224, 224), dtype=np.float32)
@@ -196,15 +201,22 @@ class FeatureEngine:
             batch[i] = img_norm.transpose(2, 0, 1)
         return batch
 
-    @torch.no_grad()
     def extract_dino_batch(self, crop_list: List[np.ndarray]) -> np.ndarray:
         if not crop_list: return np.array([])
+        
+        # Preprocess
         img_batch_np = self.preprocess_batch(crop_list)
-        img_batch_t = torch.from_numpy(img_batch_np).to(device)
-        if device.type == 'cuda': img_batch_t = img_batch_t.half()
-        embeddings = self.model(img_batch_t)
-        embeddings = F.normalize(embeddings, p=2, dim=1)
-        return embeddings.cpu().float().numpy()
+        
+        # Run ONNX Inference
+        # ไม่ต้องใช้ torch.no_grad() หรือ .to(device) เพราะ ONNX จัดการเอง
+        outputs = self.sess.run(None, {self.input_name: img_batch_np})
+        
+        # Normalize (ทำด้วย Numpy เพราะ ONNX คืนค่าเป็น Numpy)
+        embeddings = outputs[0]
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        embeddings = embeddings / (norms + 1e-6) # ป้องกันหาร 0
+        
+        return embeddings
 
     def extract_sift(self, img: np.ndarray) -> Optional[np.ndarray]:
         gray = cv2.cvtColor(img, cv2.COLOR_RGBA2GRAY)
