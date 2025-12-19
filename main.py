@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-PILLTRACK – SENIOR EDITION (HIS INTEGRATED + ROBUST CAMERA)
-✔ Supports Standalone & Integrated (HIS) Modes
-✔ Auto-detects Raspberry Pi Camera (Picamera2) vs USB Webcam (OpenCV)
+PILLTRACK – SENIOR EDITION (STRICT RGB PIPELINE)
+✔ Pipeline is 100% RGB (No BGR logic internally)
+✔ Auto-detects Raspberry Pi Camera (Picamera2) vs USB Webcam
 ✔ Real-time Cross-check with Hospital Prescription
 """
 
@@ -47,7 +47,7 @@ class Config:
     AI_SIZE: int = 416
     CONF_THRESHOLD: float = yaml_cfg['settings']['yolo_conf']
     
-    # [NEW] Operation Settings
+    # Operation Settings
     MODE: str = yaml_cfg.get('operation', {}).get('mode', 'standalone')
     
     # Scoring weights
@@ -64,6 +64,7 @@ class Config:
     VERIFY_THRESHOLD: float = 0.6
     UI_UPDATE_FPS: int = 20
     
+    # Normalization (ImageNet is RGB based)
     MEAN: np.ndarray = field(default_factory=lambda: np.array([0.485, 0.456, 0.406], dtype=np.float32))
     STD: np.ndarray = field(default_factory=lambda: np.array([0.229, 0.224, 0.225], dtype=np.float32))
 
@@ -71,11 +72,10 @@ CFG = Config()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
-# ================= 📷 CAMERA HANDLER (NEW) =================
+# ================= 📷 CAMERA HANDLER (STRICT RGB) =================
 class CameraHandler:
     """
-    Handles camera initialization safely.
-    Prioritizes Picamera2 (for RPi 5) -> Falls back to OpenCV (for Mac/PC/USB)
+    Handles camera initialization ensuring RGB output.
     """
     def __init__(self, width=1280, height=720):
         self.width = width
@@ -88,35 +88,36 @@ class CameraHandler:
         try:
             from picamera2 import Picamera2
             self.picam = Picamera2()
+            # FORCE RGB888 format
             config = self.picam.create_preview_configuration(
                 main={"size": (self.width, self.height), "format": "RGB888"}
             )
             self.picam.configure(config)
             self.picam.start()
             self.use_picamera = True
-            print("📷 Camera: Using Picamera2 (Libcamera)")
+            print("📷 Camera: Using Picamera2 (RGB888 Native)")
         except Exception as e:
-            print(f"⚠️ Picamera2 not found or failed ({e}). Falling back to OpenCV.")
+            print(f"⚠️ Picamera2 failed ({e}). Falling back to OpenCV.")
             self.use_picamera = False
             self.cap = cv2.VideoCapture(0)
             if not self.cap.isOpened():
-                raise RuntimeError("❌ Could not open any camera (Picamera2 failed, OpenCV failed).")
+                raise RuntimeError("❌ Could not open any camera.")
             
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-            print("📷 Camera: Using OpenCV VideoCapture(0)")
+            print("📷 Camera: Using OpenCV VideoCapture (Will convert BGR->RGB)")
 
     def get_frame(self):
         if self.use_picamera:
-            # Picamera2 returns array directly (RGB usually, OpenCV needs BGR)
-            frame = self.picam.capture_array()
-            # Picamera2 often gives RGB, OpenCV needs BGR for imshow
-            return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            # Picamera2 configured as RGB888, returns RGB directly
+            return self.picam.capture_array()
         else:
             ret, frame = self.cap.read()
             if not ret:
                 return None
-            return frame
+            # OpenCV returns BGR by default, we convert to RGB IMMEDIATELY
+            # From this point on, everything is RGB.
+            return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
     def release(self):
         if self.use_picamera:
@@ -126,10 +127,8 @@ class CameraHandler:
 
 # ================= 🧠 PRESCRIPTION MANAGER =================
 class PrescriptionManager:
-    """Manages drug validation based on HIS or Local DB"""
-    
     def __init__(self):
-        self.target_drugs = {} # Format: {norm_name: {"original": name, "qty": x, "found": 0}}
+        self.target_drugs = {} 
         self.patient_name = "Standalone Mode"
         self.is_ready = False
         
@@ -138,7 +137,6 @@ class PrescriptionManager:
             self.is_ready = True
 
     def load_local_all(self):
-        """Load all drugs for search mode"""
         if not os.path.exists(CFG.DRUG_LIST_JSON): return
         with open(CFG.DRUG_LIST_JSON, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -146,7 +144,6 @@ class PrescriptionManager:
             self.target_drugs[normalize_name(d)] = {"original": d, "qty": None, "found": 0}
 
     def update_from_his(self, his_data: Dict):
-        """Update target drugs from HIS API data"""
         self.target_drugs = {}
         self.patient_name = his_data.get('patient_name', 'Unknown')
         for item in his_data.get('prescription', []):
@@ -157,19 +154,18 @@ class PrescriptionManager:
                 "found": 0
             }
         self.is_ready = True
-        print(f"📦 Prescription Loaded for {self.patient_name}: {len(self.target_drugs)} items")
+        print(f"📦 Prescription Loaded: {len(self.target_drugs)} items")
 
     def verify(self, detected_name: str):
-        """Check if detected drug is in the target list"""
         norm_det = normalize_name(detected_name)
         if norm_det in self.target_drugs:
-            # ในที่นี้เรานับว่า 'เจอแล้ว' (สามารถขยาย logic ไปนับจำนวนเม็ดได้)
             self.target_drugs[norm_det]['found'] = 1 
             return True
         return False
 
 # ================= 🛠️ UTILS =================
 def draw_text(img, text, pos, scale=0.5, color=(255,255,255), thickness=1):
+    # Note: Color input must be RGB tuple e.g. (255, 0, 0) for RED
     cv2.putText(img, text, pos, FONT, scale, (0,0,0), thickness+2)
     cv2.putText(img, text, pos, FONT, scale, color, thickness)
 
@@ -179,7 +175,7 @@ def normalize_name(name: str) -> str:
     name = re.sub(r'[^a-z0-9]', '', name)
     return name
 
-# ================= 🔍 FEATURE ENGINE =================
+# ================= 🔍 FEATURE ENGINE (RGB ADAPTED) =================
 class FeatureEngine:
     def __init__(self):
         print("⏳ Loading DINOv2...")
@@ -189,9 +185,11 @@ class FeatureEngine:
         self.sift = cv2.SIFT_create(nfeatures=500)
         
     def preprocess_batch(self, crop_list: List[np.ndarray]) -> np.ndarray:
+        # Input crop_list is already RGB
         batch = np.zeros((len(crop_list), 3, 224, 224), dtype=np.float32)
         for i, img in enumerate(crop_list):
             img_resized = cv2.resize(img, (224, 224), interpolation=cv2.INTER_LINEAR)
+            # Normalize RGB (Mean/Std are for RGB)
             img_norm = (img_resized.astype(np.float32) / 255.0 - CFG.MEAN) / CFG.STD
             batch[i] = img_norm.transpose(2, 0, 1)
         return batch
@@ -207,7 +205,8 @@ class FeatureEngine:
         return embeddings.cpu().float().numpy()
 
     def extract_sift(self, img: np.ndarray) -> Optional[np.ndarray]:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # Input img is RGB. Use RGB2GRAY
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
         _, descriptors = self.sift.detectAndCompute(gray, None)
         return descriptors
 
@@ -216,7 +215,7 @@ class AIProcessor:
     def __init__(self):
         self.rx = PrescriptionManager()
         self.engine = FeatureEngine()
-        self.his = HISConnector() # [NEW]
+        self.his = HISConnector()
         
         self.db_vectors, self.db_names, self.db_sift_map = [], [], {}
         self.bf = cv2.BFMatcher()
@@ -259,10 +258,13 @@ class AIProcessor:
         return max_score
 
     def process(self, frame: np.ndarray):
-        if not self.rx.is_ready: return # รอดึงข้อมูลคนไข้ก่อน
+        # Frame is strictly RGB
+        if not self.rx.is_ready: return
         
         t_start = time.perf_counter()
         img_resized = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE))
+        
+        # YOLO works with RGB
         res = self.yolo(img_resized, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
 
         if res.boxes is None or len(res.boxes) == 0:
@@ -322,19 +324,27 @@ class AIProcessor:
 
 # ================= 🖥️ UI & DISPLAY =================
 def draw_ui(frame: np.ndarray, ai_proc: AIProcessor):
+    # Frame is RGB. Colors must be defined as (R, G, B)
     rx = ai_proc.rx
+    
+    # Colors (RGB)
+    COLOR_CYAN = (0, 255, 255) # RGB
+    COLOR_YELLOW = (255, 255, 0) # RGB
+    COLOR_GREEN = (0, 255, 0)
+    COLOR_GRAY = (150, 150, 150)
+    COLOR_RED = (255, 0, 0)
     
     # Header
     status_text = f"MODE: {CFG.MODE.upper()} | PATIENT: {rx.patient_name}"
-    draw_text(frame, status_text, (20, CFG.DISPLAY_SIZE[1] - 30), 0.6, (0, 255, 255), 2)
+    draw_text(frame, status_text, (20, CFG.DISPLAY_SIZE[1] - 30), 0.6, COLOR_CYAN, 2)
 
     # Checklist Area
     y_pos = 50
-    draw_text(frame, "PRESCRIPTION CHECKLIST:", (CFG.DISPLAY_SIZE[0] - 300, 30), 0.6, (255, 255, 0), 2)
+    draw_text(frame, "PRESCRIPTION CHECKLIST:", (CFG.DISPLAY_SIZE[0] - 300, 30), 0.6, COLOR_YELLOW, 2)
     
     for norm, data in rx.target_drugs.items():
         is_found = data['found'] > 0
-        color = (0, 255, 0) if is_found else (150, 150, 150)
+        color = COLOR_GREEN if is_found else COLOR_GRAY
         qty_str = f" x{data['qty']}" if data['qty'] else ""
         text = f"{'✔' if is_found else '□'} {data['original'].upper()}{qty_str}"
         
@@ -346,7 +356,7 @@ def draw_ui(frame: np.ndarray, ai_proc: AIProcessor):
         for res in ai_proc.results:
             x1, y1, x2, y2 = res['box']
             label, conf = res['label'], res['conf']
-            color = (0, 255, 0) if conf > CFG.VERIFY_THRESHOLD else (0, 255, 255)
+            color = COLOR_GREEN if conf > CFG.VERIFY_THRESHOLD else COLOR_CYAN
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             draw_text(frame, f"{label} {conf:.2f}", (x1, y1 - 10), 0.4, color, 1)
 
@@ -356,7 +366,7 @@ def main():
         try: SyncManager().sync()
         except: pass
 
-    # Initialize Camera Handler (Safe Mode)
+    # Initialize Camera (Strict RGB)
     try:
         camera = CameraHandler(width=CFG.DISPLAY_SIZE[0], height=CFG.DISPLAY_SIZE[1])
     except RuntimeError as e:
@@ -365,15 +375,15 @@ def main():
 
     ai = AIProcessor().start()
     
-    print(f"🚀 Started in {CFG.MODE} mode.")
+    print(f"🚀 Started in {CFG.MODE} mode (RGB Pipeline).")
     if CFG.MODE == "integrated":
         print("⌨️ Press 'H' to fetch prescription for HN123")
 
     while True:
+        # frame is GUARANTEED to be RGB here
         frame = camera.get_frame()
         if frame is None:
-            # เพิ่ม Log เพื่อแจ้งเตือนว่าอ่านภาพไม่ได้ (อาจจะแค่เฟรมกระตุก หรือหลุด)
-            print("⚠️ Warning: Empty frame received. Retrying...")
+            print("⚠️ Warning: Empty frame received.")
             time.sleep(0.1)
             continue
         
@@ -383,14 +393,18 @@ def main():
         if ai.rx.is_ready:
             draw_ui(display_frame, ai)
         else:
-            draw_text(display_frame, "WAITING FOR PATIENT DATA... (PRESS 'H')", (400, 360), 0.8, (0, 0, 255), 2)
+            # Color RGB Red = (255, 0, 0)
+            draw_text(display_frame, "WAITING FOR PATIENT DATA... (PRESS 'H')", (400, 360), 0.8, (255, 0, 0), 2)
 
-        cv2.imshow("PillTrack HIS", display_frame)
+        # ⚠️ CRITICAL DISPLAY NOTE:
+        # We processed everything in RGB. But cv2.imshow EXPECTS BGR.
+        # If we pass RGB to it, Red becomes Blue. 
+        # To respect "No BGR logic" in our code, we swap ONLY for the window display.
+        cv2.imshow("PillTrack HIS (RGB)", cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR))
         
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'): break
         elif key == ord('h') and CFG.MODE == "integrated":
-            # จำลองการส่ง HN123 ไปดึงข้อมูล
             print("🔄 Fetching data...")
             data = ai.his.fetch_prescription("HN123")
             if data: ai.rx.update_from_his(data)
