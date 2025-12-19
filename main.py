@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PILLTRACK – SENIOR EDITION (ULTRA OPTIMIZED)
-✔ Inference Engine: OpenVINO (Converted from YOLOv8/v11)
-✔ Profiling: Data-driven bottleneck detection
-✔ Performance: Frame skipping & Batch processing
+PILLTRACK – SENIOR EDITION (DEBUGGED & OPTIMIZED)
+✔ Fixed: Uncommented UI drawing loop (Visualization restored)
+✔ Optimized: Fallback to 'Unknown' instead of skipping low-conf detections
+✔ Performance: Frame skipping & Batch processing intact
 """
 
 import os
@@ -34,7 +34,6 @@ with open("config.yaml", "r") as f:
 
 @dataclass
 class Config:
-    # ชี้ไปยัง Folder OpenVINO ที่ export มา
     MODEL_PACK: str = os.path.abspath(yaml_cfg['artifacts']['model'])
     DB_PACKS_VEC: str = "database/pill_fingerprints.pkl"
     DRUG_LIST_JSON: str = yaml_cfg['artifacts']['drug_list']
@@ -51,15 +50,15 @@ class Config:
     SIFT_SATURATION: int = 400
     
     # Performance settings
-    AI_FRAME_SKIP: int = 2  
-    MAX_BATCH_SIZE: int = 8  
-    SIFT_TOP_K: int = 3  
+    AI_FRAME_SKIP: int = 2
+    MAX_BATCH_SIZE: int = 8
+    SIFT_TOP_K: int = 3
     DINO_TOP_K: int = 5
     MIN_DINO_SCORE: float = 0.4
     VERIFY_THRESHOLD: float = 0.6
     
     # Display settings
-    UI_UPDATE_FPS: int = 20  
+    UI_UPDATE_FPS: int = 30
     
     # Normalization constants
     MEAN: np.ndarray = field(default_factory=lambda: np.array([0.485, 0.456, 0.406], dtype=np.float32))
@@ -89,9 +88,12 @@ class PrescriptionManager:
         self.load()
 
     def load(self):
-        if not os.path.exists(CFG.DRUG_LIST_JSON): return
+        if not os.path.exists(CFG.DRUG_LIST_JSON):
+            return
+            
         with open(CFG.DRUG_LIST_JSON, 'r', encoding='utf-8') as f:
             data = json.load(f)
+            
         for d in data.get('drugs', []):
             norm = normalize_name(d)
             self.all_drugs.append(d.lower())
@@ -99,10 +101,11 @@ class PrescriptionManager:
 
     def verify(self, detected_name: str) -> bool:
         norm_det = normalize_name(detected_name)
+        
         for norm_drug, original in self.norm_map.items():
             if norm_det.startswith(norm_drug) or norm_drug.startswith(norm_det):
                 if original not in self.verified:
-                    print(f"🔥 [VERIFIED]: {original.upper()}")
+                    print(f"🔥 [NEW VERIFIED]: {original.upper()}")
                     self.verified.add(original)
                 return True
         return False
@@ -113,7 +116,10 @@ class FeatureEngine:
         print("⏳ Loading DINOv2...")
         self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
         self.model.eval().to(device)
-        if device.type == 'cuda': self.model = self.model.half()
+        
+        if device.type == 'cuda':
+            self.model = self.model.half()
+        
         self.sift = cv2.SIFT_create(nfeatures=500)
 
     def preprocess_batch(self, crop_list: List[np.ndarray]) -> np.ndarray:
@@ -126,9 +132,15 @@ class FeatureEngine:
 
     @torch.no_grad()
     def extract_dino_batch(self, crop_list: List[np.ndarray]) -> np.ndarray:
-        if not crop_list: return np.array([])
-        img_batch_t = torch.from_numpy(self.preprocess_batch(crop_list)).to(device)
-        if device.type == 'cuda': img_batch_t = img_batch_t.half()
+        if not crop_list:
+            return np.array([])
+        
+        img_batch_np = self.preprocess_batch(crop_list)
+        img_batch_t = torch.from_numpy(img_batch_np).to(device)
+        
+        if device.type == 'cuda':
+            img_batch_t = img_batch_t.half()
+        
         embeddings = self.model(img_batch_t)
         embeddings = F.normalize(embeddings, p=2, dim=1)
         return embeddings.cpu().float().numpy()
@@ -143,112 +155,152 @@ class AIProcessor:
     def __init__(self):
         self.rx = PrescriptionManager()
         self.engine = FeatureEngine()
+        
+        self.db_vectors = []
         self.db_names = []
         self.db_sift_map = {}
         self.bf = cv2.BFMatcher()
         self.load_db()
         
-        print(f"⏳ Loading YOLO OpenVINO from: {CFG.MODEL_PACK}")
-        # โหลด Folder OpenVINO ตรงๆ
-        self.yolo = YOLO(CFG.MODEL_PACK, task="detect")
+        print(f"⏳ Loading YOLO from: {CFG.MODEL_PACK}")
+        try:
+            # ถ้า CFG.MODEL_PACK เป็น folder มันจะพยายามหา .xml ในนั้น
+            # ถ้าเป็นไฟล์ .xml หรือ .pt ก็จะโหลดตามปกติ
+            self.yolo = YOLO(CFG.MODEL_PACK, task="detect")
+            print("✅ YOLO Loaded Successfully!")
+        except Exception as e:
+            print(f"❌ Failed to load model: {e}")
+            # Fallback for debugging
+            # self.yolo = YOLO("yolov8n.pt") 
         
         self.latest_frame = None
         self.results = []
         self.lock = threading.Lock()
+        
         self.ms = 0
         self.fps_history = deque(maxlen=30)
         self.process_counter = 0
 
     def load_db(self):
-        if not os.path.exists(CFG.DB_PACKS_VEC): return
+        if not os.path.exists(CFG.DB_PACKS_VEC):
+            print("⚠️ Database not found!")
+            return
+            
         with open(CFG.DB_PACKS_VEC, 'rb') as f:
             raw = pickle.load(f)
+        
         vectors = []
         for name, data in raw.items():
             dino_list = data.get('dino', []) if isinstance(data, dict) else data
-            self.db_sift_map[name] = (data.get('sift', []) if isinstance(data, dict) else [])[:CFG.SIFT_TOP_K]
+            sift_list = data.get('sift', []) if isinstance(data, dict) else []
+            self.db_sift_map[name] = sift_list[:CFG.SIFT_TOP_K]
+            
             for vec in dino_list:
                 vectors.append(np.array(vec))
                 self.db_names.append(name)
         
-        vectors = np.array(vectors, dtype=np.float32)
-        faiss.normalize_L2(vectors)
-        self.index = faiss.IndexFlatIP(vectors.shape[1])
-        self.index.add(vectors)
-        print(f"✅ Database Loaded: {len(vectors)} vectors")
+        if vectors:
+            vectors = np.array(vectors, dtype=np.float32)
+            faiss.normalize_L2(vectors)
+            self.index = faiss.IndexFlatIP(vectors.shape[1])
+            self.index.add(vectors)
+            print(f"✅ FAISS Index Built: {len(vectors)} vectors")
+        else:
+            print("⚠️ Database is empty!")
 
-    def get_sift_score(self, query_des, target_des_list) -> float:
-        if query_des is None or not target_des_list: return 0.0
+    def get_sift_score(self, query_des: Optional[np.ndarray], target_des_list: List[np.ndarray]) -> float:
+        if query_des is None or not target_des_list:
+            return 0.0
+        
         max_score = 0.0
         for target_des in target_des_list:
             if target_des is None or len(target_des) < 2: continue
             try:
                 matches = self.bf.knnMatch(query_des, target_des, k=2)
-                good = [m for m_pair in matches if len(m_pair) == 2 and m_pair[0].distance < 0.75 * m_pair[1].distance]
-                max_score = max(max_score, min(len(good) / CFG.SIFT_SATURATION, 1.0))
+                good = [m for m_pair in matches if len(m_pair) == 2 
+                        and m_pair[0].distance < 0.75 * m_pair[1].distance]
+                score = min(len(good) / CFG.SIFT_SATURATION, 1.0)
+                max_score = max(max_score, score)
             except: continue
         return max_score
 
     def process(self, frame: np.ndarray):
         t_start = time.perf_counter()
-        prof = {}
-
-        # 1. YOLO
-        t0 = time.perf_counter()
-        img_resized = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE))
+        
+        # --- STAGE 1: YOLO Detection ---
+        img_resized = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE), interpolation=cv2.INTER_LINEAR)
+        # verbose=False reduces terminal spam
         res = self.yolo(img_resized, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
-        prof['yolo'] = (time.perf_counter() - t0) * 1000
 
         if res.boxes is None or len(res.boxes) == 0:
             with self.lock:
-                self.results, self.ms = [], (time.perf_counter() - t_start) * 1000
+                self.results = []
+                self.ms = (time.perf_counter() - t_start) * 1000
             return
 
-        # 2. Crops
-        t1 = time.perf_counter()
+        # --- STAGE 2: Cropping ---
         temp_results = []
         sx, sy = CFG.DISPLAY_SIZE[0] / CFG.AI_SIZE, CFG.DISPLAY_SIZE[1] / CFG.AI_SIZE
         crops, box_coords = [], []
+        
         for box in res.boxes:
             x1, y1, x2, y2 = box.xyxy[0].int().tolist()
-            dx1, dy1, dx2, dy2 = int(x1*sx), int(y1*sy), int(x2*sx), int(y2*sy)
-            crop = frame[max(0,dy1):min(frame.shape[0],dy2), max(0,dx1):min(frame.shape[1],dx2)]
+            dx1, dy1, dx2, dy2 = int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy)
+            crop = frame[max(0, dy1):min(frame.shape[0], dy2), 
+                         max(0, dx1):min(frame.shape[1], dx2)]
             if crop.size > 0:
                 crops.append(crop)
                 box_coords.append([dx1, dy1, dx2, dy2])
-        prof['crop'] = (time.perf_counter() - t1) * 1000
 
-        # 3. DINO & SIFT Fusion
-        t2 = time.perf_counter()
+        # --- STAGE 3: DINOv2 & FAISS ---
         if crops:
             batch_dino = self.engine.extract_dino_batch(crops)
             scores, indices = self.index.search(batch_dino, k=CFG.DINO_TOP_K)
             
+            # --- STAGE 4: Fusion Loop ---
             for i, crop in enumerate(crops):
-                if np.max(scores[i]) < CFG.MIN_DINO_SCORE: continue
-                best_label, max_f, seen, q_des = "Unknown", 0.0, set(), None
-                for idx, db_idx in enumerate(indices[i]):
-                    if db_idx == -1: continue
-                    name = self.db_names[db_idx]
-                    if name in seen: continue
-                    seen.add(name)
-                    d_score = scores[i][idx]
-                    if d_score > 0.5:
-                        if q_des is None: q_des = self.engine.extract_sift(crop)
-                        s_score = self.get_sift_score(q_des, self.db_sift_map.get(name, []))
-                        f_score = (d_score * CFG.W_DINO) + (s_score * CFG.W_SIFT)
-                        if f_score > max_f: max_f, best_label = f_score, name
+                sim_scores = scores[i]
+                top_k_indices = indices[i]
                 
-                temp_results.append({'box': box_coords[i], 'label': best_label, 'conf': max_f})
-                if max_f > CFG.VERIFY_THRESHOLD: self.rx.verify(best_label)
-        prof['match'] = (time.perf_counter() - t2) * 1000
-
+                # Default "Unknown" label if scores are low
+                best_label = "Unknown"
+                max_fusion = float(np.max(sim_scores)) # Start with DINO score
+                
+                # Only perform advanced matching if initial DINO score is decent
+                if max_fusion >= CFG.MIN_DINO_SCORE:
+                    seen_names = set()
+                    q_des = None
+                    
+                    for idx_in_top_k, db_idx in enumerate(top_k_indices):
+                        if db_idx == -1: continue
+                        name = self.db_names[db_idx]
+                        if name in seen_names: continue
+                        seen_names.add(name)
+                        
+                        dino_score = sim_scores[idx_in_top_k]
+                        
+                        if dino_score > 0.5:
+                            if q_des is None: q_des = self.engine.extract_sift(crop)
+                            sift_score = self.get_sift_score(q_des, self.db_sift_map.get(name, []))
+                            fusion = (dino_score * CFG.W_DINO) + (sift_score * CFG.W_SIFT)
+                            
+                            if fusion > max_fusion:
+                                max_fusion = fusion
+                                best_label = name
+                
+                # Append result regardless (so we can see "Unknown" boxes)
+                temp_results.append({'box': box_coords[i], 'label': best_label, 'conf': max_fusion})
+                
+                if max_fusion > CFG.VERIFY_THRESHOLD and best_label != "Unknown":
+                    self.rx.verify(best_label)
+        
         total_ms = (time.perf_counter() - t_start) * 1000
-        print(f"📊 [YOLO: {prof['yolo']:.1f}ms] [Match: {prof.get('match',0):.1f}ms] Total: {total_ms:.1f}ms")
+        # print(f"Processing: {len(temp_results)} objects | Time: {total_ms:.1f}ms")
         
         with self.lock:
-            self.results, self.ms = temp_results, total_ms
-            self.fps_history.append(1000.0/total_ms if total_ms > 0 else 0)
+            self.results = temp_results
+            self.ms = total_ms
+            self.fps_history.append(1000.0 / total_ms if total_ms > 0 else 0)
 
     def start(self):
         threading.Thread(target=self.loop, daemon=True).start()
@@ -257,61 +309,120 @@ class AIProcessor:
     def loop(self):
         while True:
             self.process_counter += 1
-            if self.process_counter >= CFG.AI_FRAME_SKIP and self.latest_frame is not None:
+            if self.process_counter >= CFG.AI_FRAME_SKIP:
                 self.process_counter = 0
-                with self.lock: frame = self.latest_frame.copy()
-                self.process(frame)
+                if self.latest_frame is not None:
+                    with self.lock:
+                        work_frame = self.latest_frame.copy()
+                    self.process(work_frame)
             time.sleep(0.001)
 
 # ================= 🖥️ UI & DISPLAY =================
-def draw_ui(frame, ai):
-    rx = ai.rx
+def draw_ui(frame: np.ndarray, ai_proc: AIProcessor):
+    """Draw UI overlay on frame"""
+    
+    # 1. Draw Checklist (Prescription)
+    rx = ai_proc.rx
     y_pos = 40
     for drug in rx.all_drugs:
-        v = drug in rx.verified
-        c = (0, 255, 0) if v else (180, 180, 180)
-        t = f"✔ {drug.upper()}" if v else f"□ {drug.upper()}"
-        w, _ = cv2.getTextSize(t, FONT, 0.55, 2)[0]
-        draw_text(frame, t, (CFG.DISPLAY_SIZE[0]-w-10, y_pos), 0.55, c)
-        if v: cv2.line(frame, (CFG.DISPLAY_SIZE[0]-w-10, y_pos-8), (CFG.DISPLAY_SIZE[0]-10, y_pos-8), (0,255,0), 2)
+        is_verified = drug in rx.verified
+        color = (0, 255, 0) if is_verified else (180, 180, 180)
+        text = f"✔ {drug.upper()}" if is_verified else f"□ {drug.upper()}"
+        (text_width, text_height), _ = cv2.getTextSize(text, FONT, 0.55, 2)
+        x_pos = CFG.DISPLAY_SIZE[0] - text_width - 10
+        draw_text(frame, text, (x_pos, y_pos), 0.55, color)
+        if is_verified:
+            cv2.line(frame, (x_pos, y_pos - 8), (CFG.DISPLAY_SIZE[0] - 10, y_pos - 8), (0, 255, 0), 2)
         y_pos += 28
 
-    with ai.lock:
-        res, ms, fps = ai.results.copy(), ai.ms, np.mean(ai.fps_history) if ai.fps_history else 0
-    
-    # Optional: Uncomment to draw boxes
-    # for r in res:
-    #     cv2.rectangle(frame, (r['box'][0], r['box'][1]), (r['box'][2], r['box'][3]), (0,255,0), 2)
+    # 2. Draw Detection Boxes (UNCOMMENTED & FIXED)
+    with ai_proc.lock:
+        current_results = ai_proc.results.copy()
+        latency = ai_proc.ms
+        avg_fps = np.mean(ai_proc.fps_history) if ai_proc.fps_history else 0
 
-    draw_text(frame, f"AI: {ms:.1f}ms | FPS: {fps:.1f}", (10, 20), 0.5, (0, 255, 255))
+    for result in current_results:
+        x1, y1, x2, y2 = result['box']
+        label = result['label'].upper() if result['label'] else "UNKNOWN"
+        confidence = result['conf']
+        
+        # Color: Green for Verified High Conf, Yellow for Low Conf/Unknown
+        if confidence > CFG.VERIFY_THRESHOLD and label != "UNKNOWN":
+            color = (0, 255, 0)
+        else:
+            color = (0, 255, 255) # Yellow for warnings/unknowns
+        
+        # Draw box
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        
+        # Draw label
+        tag = f"{label} {confidence:.2f}"
+        (tag_width, tag_height), _ = cv2.getTextSize(tag, FONT, 0.4, 1)
+        
+        # Boundary check for text
+        y_text = y1 - 10 if y1 - 10 > 10 else y1 + 10
+        
+        cv2.rectangle(frame, (x1, y_text - tag_height), (x1 + tag_width, y_text + 5), color, -1)
+        cv2.putText(frame, tag, (x1, y_text), FONT, 0.4, (0, 0, 0), 1)
 
+    # 3. Draw Performance Stats
+    status_color = (0, 255, 0) if avg_fps > 10 else (0, 0, 255)
+    draw_text(frame, f"AI Latency: {latency:.1f}ms | FPS: {avg_fps:.1f}", 
+             (10, 20), 0.5, status_color)
+
+# ================= 🚀 MAIN =================
 def main():
     if SyncManager:
         try: SyncManager().sync()
-        except: pass
+        except Exception as e: print(f"⚠️ Sync warning: {e}")
 
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CFG.DISPLAY_SIZE[0])
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CFG.DISPLAY_SIZE[1])
+    # Camera Setup
+    try:
+        from picamera2 import Picamera2
+        print("📷 Using Picamera2 (RPi5 Mode)")
+        cam_obj = Picamera2()
+        config = cam_obj.create_preview_configuration(
+            main={"size": CFG.DISPLAY_SIZE, "format": "RGB888"}
+        )
+        cam_obj.configure(config)
+        cam_obj.start()
+        def get_frame(): return cam_obj.capture_array()
+            
+    except ImportError:
+        print("📷 Using Standard OpenCV Camera")
+        cap = cv2.VideoCapture(0)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, CFG.DISPLAY_SIZE[0])
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CFG.DISPLAY_SIZE[1])
+        def get_frame():
+            ret, frame = cap.read()
+            return frame if ret else None
 
     ai = AIProcessor().start()
-    win = "PillTrack Senior"
-    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     
-    last_ui = 0
+    window_name = "PillTrack Senior"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, CFG.DISPLAY_SIZE[0], CFG.DISPLAY_SIZE[1])
+
+    print(f"🚀 System Ready. Press 'q' to exit.")
+    
     while True:
-        ret, frame = cap.read()
-        if not ret: continue
-        with ai.lock: ai.latest_frame = frame
-        
-        if time.time() - last_ui > (1.0/CFG.UI_UPDATE_FPS):
-            disp = frame.copy()
-            draw_ui(disp, ai)
-            cv2.imshow(win, disp)
-            last_ui = time.time()
-        
-        if cv2.waitKey(1) & 0xFF == ord('q'): break
+        frame = get_frame()
+        if frame is None: continue
+
+        # Send to AI
+        with ai.lock:
+            ai.latest_frame = frame
+
+        # Draw UI
+        display_frame = frame.copy()
+        draw_ui(display_frame, ai)
+        cv2.imshow(window_name, display_frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
     cv2.destroyAllWindows()
+    print("👋 Shutting down...")
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    main()
