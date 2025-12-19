@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-PILLTRACK – HYBRID ENGINE (WITH SEGMENT VISUALIZATION & LIVE LOGS)
-✔ Draw Bounding Boxes & Labels
-✔ Real-time Console Logging
-✔ Hybrid Vector Search (DINOv2 + SIFT)
+PILLTRACK – SENIOR EDITION (HYBRID ENGINE + LIVE VISUALIZATION)
+✔ Real-time Bounding Boxes & Labels
+✔ Thread-safe shared results
+✔ Matrix Vectorized Search + SIFT Refinement
+✔ 10FPS UI / Full-speed AI Inference
 """
 
 import os
@@ -21,24 +22,23 @@ import torch.nn.functional as F
 from dataclasses import dataclass, field
 from typing import Tuple, List, Dict
 from ultralytics import YOLO
-# from sync_manager import SyncManager # เปิดใช้งานถ้ามีไฟล์ sync
+from sync_manager import SyncManager
 
 # ================= ⚙️ CONFIG =================
-# จำลอง config ถ้าไม่มีไฟล์จริง
-DEFAULT_CFG = {
-    'artifacts': {'model': 'yolov8n.pt', 'drug_list': 'drug_list.json'},
-    'display': {'width': 640, 'height': 480},
-    'settings': {'yolo_conf': 0.45}
-}
+with open("config.yaml", "r") as f:
+    yaml_cfg = yaml.safe_load(f)
 
 @dataclass
 class Config:
-    MODEL_PACK: str = "yolov8n.pt" # เปลี่ยนเป็น path ของคุณ
+    MODEL_PACK: str = yaml_cfg['artifacts']['model']
     DB_PACKS_VEC: str = "database/pill_fingerprints.pkl"
-    DRUG_LIST_JSON: str = "drug_list.json"
-    DISPLAY_SIZE: Tuple[int, int] = (640, 480)
+    DRUG_LIST_JSON: str = yaml_cfg['artifacts']['drug_list']
+    DISPLAY_SIZE: Tuple[int, int] = (
+        yaml_cfg['display']['width'],
+        yaml_cfg['display']['height']
+    )
     AI_SIZE: int = 416
-    CONF_THRESHOLD: float = 0.45
+    CONF_THRESHOLD: float = yaml_cfg['settings']['yolo_conf']
     
     W_DINO: float = 0.6
     W_SIFT: float = 0.4
@@ -51,12 +51,18 @@ CFG = Config()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
-# ================= 🛠️ UI HELPERS =================
+# ================= 🛠️ UTILS =================
 def draw_text(img, text, pos, scale=0.5, color=(255,255,255), thickness=1):
     cv2.putText(img, text, pos, FONT, scale, (0,0,0), thickness+2)
     cv2.putText(img, text, pos, FONT, scale, color, thickness)
 
-# ================= 🧠 RX MANAGER =================
+def normalize_name(name: str) -> str:
+    name = name.lower()
+    name = re.sub(r'_pack.*', '', name)
+    name = re.sub(r'[^a-z0-9]', '', name)
+    return name
+
+# ================= 🧠 ENGINE =================
 class PrescriptionManager:
     def __init__(self):
         self.all_drugs = []
@@ -65,92 +71,159 @@ class PrescriptionManager:
         self.load()
 
     def load(self):
-        if not os.path.exists(CFG.DRUG_LIST_JSON): 
-            self.all_drugs = ["paracetamol", "aspirin"] # Mockup
-            return
+        if not os.path.exists(CFG.DRUG_LIST_JSON): return
         with open(CFG.DRUG_LIST_JSON, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            self.all_drugs = [d.lower() for d in data.get('drugs', [])]
+        for d in data.get('drugs', []):
+            norm = normalize_name(d)
+            self.all_drugs.append(d.lower())
+            self.norm_map[norm] = d.lower()
 
-    def verify(self, name: str):
-        name_low = name.lower()
-        if name_low in self.all_drugs and name_low not in self.verified:
-            self.verified.add(name_low)
-            print(f"🌟 [MATCH FOUND]: {name_low.upper()} verified!")
-            return True
+    def verify(self, detected_name: str):
+        norm_det = normalize_name(detected_name)
+        for norm_drug, original in self.norm_map.items():
+            if norm_det.startswith(norm_drug) or norm_drug.startswith(norm_det):
+                if original not in self.verified:
+                    print(f"🔥 [NEW VERIFIED]: {original.upper()}")
+                    self.verified.add(original)
+                return True
         return False
 
-# ================= 🧠 FEATURE ENGINE =================
 class FeatureEngine:
     def __init__(self):
         print("⏳ Loading DINOv2...")
-        self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
+        self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
         self.model.eval().to(device)
         self.sift = cv2.SIFT_create()
 
-    def extract_dino_batch(self, crop_list):
-        if not crop_list: return np.array([])
+    def preprocess_batch(self, crop_list):
         batch = []
         for img in crop_list:
             img = cv2.resize(img, (224, 224))
             img = (img.astype(np.float32) / 255.0 - CFG.MEAN) / CFG.STD
-            batch.append(img.transpose(2, 0, 1))
-        
-        t_batch = torch.from_numpy(np.array(batch)).to(device)
-        with torch.no_grad():
-            emb = self.model(t_batch)
-            emb = F.normalize(emb, p=2, dim=1)
-        return emb.cpu().numpy()
+            img = img.transpose(2, 0, 1)
+            batch.append(img)
+        return np.array(batch)
+
+    @torch.no_grad()
+    def extract_dino_batch(self, crop_list):
+        if not crop_list: return np.array([])
+        img_batch_np = self.preprocess_batch(crop_list)
+        img_batch_t = torch.from_numpy(img_batch_np).to(device)
+        embeddings = self.model(img_batch_t)
+        embeddings = F.normalize(embeddings, p=2, dim=1)
+        return embeddings.cpu().numpy()
+
+    def extract_sift(self, img):
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _, sift_des = self.sift.detectAndCompute(gray, None)
+        return sift_des
 
 # ================= 🤖 AI PROCESSOR =================
 class AIProcessor:
     def __init__(self):
         self.rx = PrescriptionManager()
         self.engine = FeatureEngine()
+        self.db_vectors = []
+        self.db_names = []
+        self.db_sift_map = {}
+        self.bf = cv2.BFMatcher()
+        self.load_db()
+        
+        print("⏳ Loading YOLO...")
         self.yolo = YOLO(CFG.MODEL_PACK)
         
-        self.db_vectors = np.random.rand(10, 384).astype('float32') # Placeholder
-        self.db_names = ["pill_a"] * 10
-        
         self.latest_frame = None
-        self.detections = [] # เก็บผลลัพธ์เพื่อส่งไปวาด [box, label, score]
+        self.results = []  # Stores: [{'box': [x1,y1,x2,y2], 'label': str, 'conf': float}]
         self.lock = threading.Lock()
         self.ms = 0
 
+    def load_db(self):
+        if not os.path.exists(CFG.DB_PACKS_VEC): return
+        with open(CFG.DB_PACKS_VEC,'rb') as f:
+            raw = pickle.load(f)
+        for name, data in raw.items():
+            dino_list = data.get('dino', []) if isinstance(data, dict) else data
+            self.db_sift_map[name] = data.get('sift', []) if isinstance(data, dict) else []
+            for vec in dino_list:
+                self.db_vectors.append(np.array(vec))
+                self.db_names.append(name)
+        self.db_vectors = np.array(self.db_vectors)
+        norms = np.linalg.norm(self.db_vectors, axis=1, keepdims=True)
+        self.db_vectors = self.db_vectors / (norms + 1e-8)
+
+    def get_sift_score(self, query_des, target_des_list):
+        if query_des is None or not target_des_list: return 0.0
+        max_score = 0.0
+        for target_des in target_des_list[:5]:
+            try:
+                matches = self.bf.knnMatch(query_des, target_des, k=2)
+                good = [m for m, n in matches if m.distance < 0.75 * n.distance]
+                score = min(len(good) / CFG.SIFT_SATURATION, 1.0)
+                max_score = max(max_score, score)
+            except: continue
+        return max_score
+
     def process(self, frame):
         t0 = time.time()
-        res = self.yolo(frame, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
-        
-        new_detections = []
-        crops = []
-        boxes_coords = []
+        img_resized = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE))
+        res = self.yolo(img_resized, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
 
-        if res.boxes:
+        temp_results = []
+        if res.boxes is not None:
+            sx = CFG.DISPLAY_SIZE[0]/CFG.AI_SIZE
+            sy = CFG.DISPLAY_SIZE[1]/CFG.AI_SIZE
+            
+            crops = []
+            box_coords = []
+            
             for box in res.boxes:
-                x1, y1, x2, y2 = box.xyxy[0].int().tolist()
-                crop = frame[y1:y2, x1:x2]
-                if crop.size > 0:
-                    crops.append(crop)
-                    boxes_coords.append((x1, y1, x2, y2))
+                x1,y1,x2,y2 = box.xyxy[0].int().tolist()
+                # Scale to Display Size
+                dx1, dy1, dx2, dy2 = int(x1*sx), int(y1*sy), int(x2*sx), int(y2*sy)
+                
+                crop = frame[max(0, dy1):min(frame.shape[0], dy2), max(0, dx1):min(frame.shape[1], dx2)]
+                if crop.size == 0: continue
+                
+                crops.append(crop)
+                box_coords.append([dx1, dy1, dx2, dy2])
 
-        if crops:
-            # Batch Feature Extraction
-            vecs = self.engine.extract_dino_batch(crops)
-            # ตัวอย่างการหา Similarity (Mockup logic)
-            for i, vec in enumerate(vecs):
-                label = "Pill" # ในงานจริงใช้ Matrix Similarity หาชื่อยา
-                score = 0.95
-                new_detections.append({
-                    "box": boxes_coords[i],
-                    "label": label,
-                    "score": score
-                })
-                # Log ตลอดเวลาเมื่อเจอ
-                print(f"🔍 Detecting: {label} ({score*100:.1f}%) at {boxes_coords[i]}")
+            if crops:
+                batch_dino = self.engine.extract_dino_batch(crops)
+                sim_matrix = np.dot(batch_dino, self.db_vectors.T)
+
+                for i, crop in enumerate(crops):
+                    sim_scores = sim_matrix[i]
+                    top_k = np.argsort(sim_scores)[::-1][:5]
+                    
+                    q_des = self.engine.extract_sift(crop)
+                    best_label, max_f = "Unknown", 0.0
+                    
+                    seen = set()
+                    for idx in top_k:
+                        name = self.db_names[idx]
+                        if name in seen: continue
+                        seen.add(name)
+                        
+                        d_score = sim_scores[idx]
+                        if d_score < 0.4: continue
+                        
+                        s_score = self.get_sift_score(q_des, self.db_sift_map.get(name, []))
+                        f_score = (d_score * CFG.W_DINO) + (s_score * CFG.W_SIFT)
+                        
+                        if f_score > max_f:
+                            max_f = f_score
+                            best_label = name
+
+                    temp_results.append({'box': box_coords[i], 'label': best_label, 'conf': max_f})
+                    if max_f > 0.6: self.rx.verify(best_label)
+                    
+                    # Log ตลอดเวลา (Continuous Logging)
+                    print(f"📡 Tracking: {best_label} | Score: {max_f:.2f}")
 
         with self.lock:
-            self.detections = new_detections
-            self.ms = (time.time() - t0) * 1000
+            self.results = temp_results
+            self.ms = (time.time()-t0)*1000
 
     def start(self):
         threading.Thread(target=self.loop, daemon=True).start()
@@ -164,61 +237,82 @@ class AIProcessor:
                 self.process(work_frame)
             time.sleep(0.01)
 
-# ================= 📷 CAMERA =================
-class Camera:
-    def __init__(self):
-        self.cap = cv2.VideoCapture(0)
-    def get(self):
-        ret, f = self.cap.read()
-        return cv2.resize(f, CFG.DISPLAY_SIZE) if ret else None
+# ================= 🖥️ UI & DISPLAY =================
+def draw_ui(frame, ai_proc):
+    # 1. Draw Checklist
+    rx = ai_proc.rx
+    y = 40
+    for drug in rx.all_drugs:
+        done = drug in rx.verified
+        color = (0,255,0) if done else (180,180,180)
+        text = f"✔ {drug.upper()}" if done else f"□ {drug.upper()}"
+        (tw, th), _ = cv2.getTextSize(text, FONT, 0.55, 2)
+        draw_text(frame, text, (CFG.DISPLAY_SIZE[0] - tw - 10, y), 0.55, color)
+        if done: cv2.line(frame, (CFG.DISPLAY_SIZE[0]-tw-10, y-8), (CFG.DISPLAY_SIZE[0]-10, y-8), (0,255,0), 2)
+        y += 28
 
-# ================= 🖥️ UI & DRAWING =================
-def draw_overlay(frame, ai_proc):
-    # 1. วาด Bounding Boxes (Segments)
+    # 2. Draw Detections (Bounding Boxes)
     with ai_proc.lock:
-        for det in ai_proc.detections:
-            x1, y1, x2, y2 = det['box']
-            label = det['label']
-            score = det['score']
-            
-            # วาดกรอบ
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            # วาดพื้นหลังตัวหนังสือ
-            cv2.rectangle(frame, (x1, y1-20), (x1+100, y1), (0, 255, 0), -1)
-            draw_text(frame, f"{label} {score:.2f}", (x1+5, y1-5), 0.4, (0,0,0), 1)
+        current_results = ai_proc.results
+        latency = ai_proc.ms
 
-    # 2. วาด Checklist (Prescription)
-    y_offset = 30
-    for drug in ai_proc.rx.all_drugs:
-        status = "✅" if drug in ai_proc.rx.verified else "□"
-        color = (0, 255, 0) if drug in ai_proc.rx.verified else (200, 200, 200)
-        draw_text(frame, f"{status} {drug.upper()}", (CFG.DISPLAY_SIZE[0]-150, y_offset), 0.5, color)
-        y_offset += 25
+    for res in current_results:
+        x1, y1, x2, y2 = res['box']
+        lbl = res['label'].upper()
+        cf = res['conf']
+        
+        # Color based on confidence
+        color = (0, 255, 0) if cf > 0.6 else (0, 255, 255)
+        
+        # Draw Box
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        
+        # Draw Label Tag
+        tag = f"{lbl} {cf:.2f}"
+        (tw, th), _ = cv2.getTextSize(tag, FONT, 0.4, 1)
+        cv2.rectangle(frame, (x1, y1-th-10), (x1+tw, y1), color, -1)
+        cv2.putText(frame, tag, (x1, y1-5), FONT, 0.4, (0,0,0), 1)
 
-# ================= 🚀 MAIN =================
+    # Status Info
+    draw_text(frame, f"AI: {latency:.1f}ms", (10, 20), 0.5, (0,255,255))
+
+# ================= 🚀 RUN =================
 if __name__ == "__main__":
-    cam = Camera()
+    try: SyncManager().sync()
+    except: pass
+
+    # Initialize Camera
+    try:
+        from picamera2 import Picamera2
+        cam_obj = Picamera2()
+        cam_obj.configure(cam_obj.create_preview_configuration(main={"size":CFG.DISPLAY_SIZE,"format":"RGB888"}))
+        cam_obj.start()
+        def get_frame(): return cam_obj.capture_array()
+    except:
+        cap = cv2.VideoCapture(0)
+        def get_frame(): 
+            ret, f = cap.read()
+            return f if ret else None
+
     ai = AIProcessor().start()
+    cv2.namedWindow("PillTrack", cv2.WINDOW_NORMAL)
 
-    print("🚀 System Live... Press 'q' to quit.")
-
+    last_ui_time = 0
     while True:
-        frame = cam.get()
-        if frame is None: break
+        frame = get_frame()
+        if frame is None: continue
 
-        # ส่งเฟรมให้ AI Thread
-        ai.latest_frame = frame
+        # Send to AI Thread
+        with ai.lock:
+            ai.latest_frame = frame
 
-        # สร้างเฟรมสำหรับแสดงผล (Draw Everything Here)
-        display_frame = frame.copy()
-        draw_overlay(display_frame, ai)
-        
-        # Dashboard
-        draw_text(display_frame, f"Latency: {ai.ms:.1f}ms", (10, 20), 0.5, (0, 255, 255))
-        
-        cv2.imshow("PillTrack – AI Vision", display_frame)
-        
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+        # UI Update (10 FPS)
+        if time.time() - last_ui_time > 0.1:
+            display_f = frame.copy()
+            draw_ui(display_f, ai)
+            cv2.imshow("PillTrack", display_f)
+            last_ui_time = time.time()
+
+        if cv2.waitKey(1) == ord('q'): break
 
     cv2.destroyAllWindows()
