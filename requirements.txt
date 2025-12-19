@@ -2,6 +2,9 @@
 # sudo apt update
 # sudo apt install python3-picamera2
 
+# pip install "ultralytics[export]" openvino
+# yolo export model=path/to/your_model.pt format=openvino half=True
+
 torch>=2.0.0
 torchvision>=0.15.0
 ultralytics>=8.0.0
