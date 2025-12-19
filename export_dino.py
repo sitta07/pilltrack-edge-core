@@ -1,25 +1,39 @@
+# export_dino_fix.py
 import torch
 import torch.nn as nn
 
-# โหลด DINOv2
-print("⏳ Downloading DINOv2...")
-model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
-model.eval()
+# 1. สร้าง Wrapper Class เพื่อบังคับ Input ให้เหลือแค่ตัวเดียว
+class DinoWrapper(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
 
-# สร้าง Dummy Input (ขนาดเท่าที่ใช้จริง)
+    def forward(self, x):
+        # เรียกโมเดลโดยไม่ส่ง masks ไป (ใช้ default ข้างในเอง)
+        return self.model(x)
+
+print("⏳ Downloading DINOv2...")
+# โหลดโมเดลตัวเดิม
+raw_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
+raw_model.eval()
+
+# 2. เอา Wrapper มาครอบ
+model = DinoWrapper(raw_model)
+
+# สร้าง Dummy Input
 dummy_input = torch.randn(1, 3, 224, 224)
 
-# Export เป็น ONNX
-print("⏳ Exporting to ONNX (This may take a minute)...")
+print("⏳ Exporting to ONNX (Clean Version)...")
 torch.onnx.export(
     model, 
     dummy_input, 
-    "dinov2_vits14.onnx", 
+    "dinov2_vits14.onnx",  # ทับไฟล์เดิมเลย
     export_params=True, 
     opset_version=17, 
     do_constant_folding=True,
-    input_names=['input'], 
+    input_names=['input'],   # ชื่อ Input ใน ONNX จะเหลือแค่อันนี้
     output_names=['output'],
     dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}}
 )
-print("✅ Done! Saved 'dinov2_vits14.onnx'")
+
+print("✅ Done! Fixed 'masks' error.")
