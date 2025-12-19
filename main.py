@@ -147,25 +147,51 @@ class AIProcessor:
         self.process_counter = 0
 
     def load_db(self):
-        if not os.path.exists(CFG.DB_PACKS_VEC): return
+        if not os.path.exists(CFG.DB_PACKS_VEC):
+            print("⚠️ Database not found!")
+            return
+            
         with open(CFG.DB_PACKS_VEC, 'rb') as f:
             raw = pickle.load(f)
         
         vectors = []
-        for name, data in raw.items():
-            # ดึงเฉพาะ Dino Vector ตัวแรก (เพื่อให้ shape คงที่)
-            dino_list = data.get('dino', []) if isinstance(data, dict) else data
-            if len(dino_list) > 0:
-                vectors.append(np.array(dino_list[0], dtype=np.float32))
-                self.db_names.append(name)
-                # เก็บ SIFT แยกไว้ (เพราะความยาวไม่เท่ากัน ห้ามยัดใส่ Matrix)
-                self.db_sift_map[name] = data.get('sift', []) if isinstance(data, dict) else []
+        expected_dim = 384  # สำหรับ ViT-Small (vits14)
+        # ถ้าใช้ ViT-Base (vitb14) ให้เปลี่ยนเป็น 768
+        
+        print(f"⏳ Loading DB and filtering for Dim: {expected_dim}...")
 
-        vectors = np.array(vectors)
-        faiss.normalize_L2(vectors)
-        self.index = faiss.IndexFlatIP(vectors.shape[1])
-        self.index.add(vectors)
-        print(f"✅ FAISS DB Ready: {len(vectors)} items")
+        for name, data in raw.items():
+            # ดึง Dino list ออกมา
+            dino_list = data.get('dino', []) if isinstance(data, dict) else data
+            
+            for vec in dino_list:
+                v_np = np.array(vec, dtype=np.float32)
+                
+                # --- [CHECK DIMENSION] ---
+                if v_np.shape[0] == expected_dim:
+                    vectors.append(v_np)
+                    self.db_names.append(name)
+                    # เก็บ SIFT เฉพาะตัวที่มี Dino ผ่านเกณฑ์
+                    self.db_sift_map[name] = data.get('sift', []) if isinstance(data, dict) else []
+                else:
+                    # ฟ้องออกมาเลยว่าตัวไหนพัง
+                    print(f"❌ Skip {name}: Wrong shape {v_np.shape} (Expected {expected_dim})")
+
+        if not vectors:
+            print("🚫 No valid vectors found in DB!")
+            return
+
+        # แปลงเป็น Matrix ก้อนเดียว (บรรทัดนี้จะไม่พังแล้วเพราะเรากรองแล้ว)
+        vectors_matrix = np.stack(vectors).astype('float32')
+        
+        # Normalize สำหรับ Cosine Similarity
+        faiss.normalize_L2(vectors_matrix)
+        
+        # สร้าง Index
+        self.index = faiss.IndexFlatIP(expected_dim)
+        self.index.add(vectors_matrix)
+        
+        print(f"✅ FAISS Index Ready: {len(vectors_matrix)} vectors")
 
     def get_sift_score(self, query_des: Optional[np.ndarray], target_des_list: List[np.ndarray]) -> float:
         if query_des is None or query_des.shape[0] < 2 or not target_des_list: return 0.0
