@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PILLTRACK – GLOBAL SEARCH EDITION (FULL DATABASE)
+PILLTRACK – GLOBAL SEARCH + PERFORMANCE LOGGER
 ✔ Pipeline: RGB8888 (RGBA 32-bit)
-✔ Search: Scans against ENTIRE database (not just prescription)
-✔ UI: Highlights correct drugs (Green) vs Wrong drugs (Red)
+✔ Global Search: Scans against entire 3,000+ drug database
+✔ Profiler: Logs ms for YOLO, DINO, SIFT, and Search individually
 """
 
 import os
@@ -54,11 +54,10 @@ class Config:
     SIFT_SATURATION: int = 400
     
     SIFT_TOP_K: int = 3
-    DINO_TOP_K: int = 5
     
     # Performance
     AI_FRAME_SKIP: int = 2
-    MIN_DINO_SCORE: float = 0.45  # Increased slightly for global search safety
+    MIN_DINO_SCORE: float = 0.45
     VERIFY_THRESHOLD: float = 0.65 
     
     # Normalization (RGB based)
@@ -144,16 +143,12 @@ class PrescriptionManager:
 
     def verify(self, detected_name: str):
         if self.is_completed: return False
-        
         norm_det = normalize_name(detected_name)
-        
-        # Check if the detected drug is in the prescription
         if norm_det in self.target_drugs:
             self.target_drugs[norm_det]['found'] = 1
             self.check_complete()
-            return True # Found correct drug
-        
-        return False # Found wrong drug
+            return True
+        return False
 
     def check_complete(self):
         all_found = all(d['found'] > 0 for d in self.target_drugs.values())
@@ -224,13 +219,13 @@ class AIProcessor:
         self.full_db_vectors = {} 
         self.full_db_sift = {}
         
-        # ACTIVE VECTORS now holds the ENTIRE DB
+        # GLOBAL SEARCH Active Vectors
         self.active_vectors = None
         self.active_names = []
         
         self.bf = cv2.BFMatcher()
         self.load_db()
-        self.prepare_global_search_space() # Load once, use everywhere
+        self.prepare_global_search_space()
         
         print("⏳ Loading YOLO...")
         self.yolo = YOLO(CFG.MODEL_PACK)
@@ -255,19 +250,16 @@ class AIProcessor:
         print(f"✅ Database loaded: {len(self.full_db_vectors)} drugs available.")
 
     def prepare_global_search_space(self):
-        """Builds a search matrix containing EVERY drug in the database."""
         if not self.full_db_vectors: return
         vectors, names = [], []
-        
         for norm_name, vec_list in self.full_db_vectors.items():
             for vec in vec_list:
                 vectors.append(vec)
                 names.append(norm_name)
-        
         if vectors:
             self.active_vectors = np.array(vectors, dtype=np.float32).T 
             self.active_names = names
-            print(f"🌍 Global Search Active: Scanning against {len(names)} vectors (Full DB).")
+            print(f"🌍 Global Search Active: Scanning against {len(names)} vectors.")
         else:
             self.active_vectors = None
 
@@ -285,15 +277,23 @@ class AIProcessor:
         if not self.rx.is_ready or self.rx.is_completed: return
         if self.active_vectors is None: return
 
-        t1 = time.perf_counter()
+        # --- TIMER START ---
+        t_start_total = time.perf_counter()
+
+        # 1. YOLO Detection
+        t_yolo_start = time.perf_counter()
         img_rgb = frame[:, :, :3]
         img_resized = cv2.resize(img_rgb, (CFG.AI_SIZE, CFG.AI_SIZE))
         res = self.yolo(img_resized, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
+        t_yolo = (time.perf_counter() - t_yolo_start) * 1000
 
         if res.boxes is None or len(res.boxes) == 0:
             with self.lock: self.results = []
+            print(f"⏱️ [IDLE] YOLO: {t_yolo:.1f}ms | No pills detected.")
             return
 
+        # 2. Cropping
+        t_crop_start = time.perf_counter()
         sx, sy = CFG.DISPLAY_SIZE[0] / CFG.AI_SIZE, CFG.DISPLAY_SIZE[1] / CFG.AI_SIZE
         crops, box_coords = [], []
         for box in res.boxes:
@@ -301,12 +301,23 @@ class AIProcessor:
             dx1, dy1, dx2, dy2 = int(x1*sx), int(y1*sy), int(x2*sx), int(y2*sy)
             crop = frame[max(0, dy1):min(frame.shape[0], dy2), max(0, dx1):min(frame.shape[1], dx2)]
             if crop.size > 0: crops.append(crop); box_coords.append([dx1, dy1, dx2, dy2])
+        t_crop = (time.perf_counter() - t_crop_start) * 1000
 
         temp_results = []
+        t_dino = 0
+        t_search = 0
+        t_sift_accum = 0 # Accumulate SIFT time per pill
+
         if crops:
+            # 3. DINOv2
+            t_dino_start = time.perf_counter()
             batch_dino = self.engine.extract_dino_batch(crops) 
+            t_dino = (time.perf_counter() - t_dino_start) * 1000
             
-            # Match against GLOBAL database
+            # 4. Global Search & Verification
+            t_search_start = time.perf_counter()
+            
+            # Vector Search
             sim_matrix = np.dot(batch_dino, self.active_vectors)
             
             for i, crop in enumerate(crops):
@@ -317,21 +328,23 @@ class AIProcessor:
                 
                 matched_name = self.active_names[best_idx]
                 
-                # Hybrid verify
+                # --- SIFT Specific Timer ---
+                t_sift_start = time.perf_counter()
                 q_des = self.engine.extract_sift(crop)
                 sift_score = self.get_sift_score(q_des, self.full_db_sift.get(matched_name, []))
+                t_sift_accum += (time.perf_counter() - t_sift_start) * 1000
+                # ---------------------------
                 
                 fusion = (dino_score * CFG.W_DINO) + (sift_score * CFG.W_SIFT)
                 
                 if fusion > CFG.VERIFY_THRESHOLD:
-                    # Determine display name and correctness
                     is_correct_drug = matched_name in self.rx.target_drugs
                     
                     if is_correct_drug:
                         display_name = self.rx.target_drugs[matched_name]['original']
-                        self.rx.verify(matched_name) # Check off the list
+                        self.rx.verify(matched_name)
                     else:
-                        display_name = matched_name.upper() # Found something else!
+                        display_name = matched_name.upper()
                     
                     temp_results.append({
                         'box': box_coords[i], 
@@ -339,9 +352,16 @@ class AIProcessor:
                         'conf': fusion,
                         'is_correct': is_correct_drug
                     })
+            
+            t_search = (time.perf_counter() - t_search_start) * 1000
 
         with self.lock:
             self.results = temp_results
+
+        # --- FINAL LOGGING ---
+        t_total = (time.perf_counter() - t_start_total) * 1000
+        # t_search includes SIFT time, so we display SIFT separately for clarity
+        print(f"⏱️ TOTAL: {t_total:.1f}ms | YOLO: {t_yolo:.1f}ms | DINO: {t_dino:.1f}ms | SIFT: {t_sift_accum:.1f}ms | Search(Mix): {t_search:.1f}ms")
 
     def start(self):
         threading.Thread(target=self.loop, daemon=True).start()
@@ -363,7 +383,7 @@ def draw_ui(frame: np.ndarray, ai_proc: AIProcessor):
     COLOR_YELLOW = (255, 255, 0, 255)
     COLOR_GREEN = (0, 255, 0, 255)
     COLOR_GRAY = (150, 150, 150, 255)
-    COLOR_RED = (0, 0, 255, 255) # Red for wrong drugs
+    COLOR_RED = (0, 0, 255, 255)
     
     status_color = COLOR_GREEN if rx.is_completed else COLOR_CYAN
     status_text = "COMPLETED - RESETTING..." if rx.is_completed else f"PATIENT: {rx.patient_name}"
@@ -384,11 +404,10 @@ def draw_ui(frame: np.ndarray, ai_proc: AIProcessor):
         with ai_proc.lock:
             for res in ai_proc.results:
                 x1, y1, x2, y2 = res['box']
-                # Determine Color: Green/Cyan if correct, RED if wrong
                 if res['is_correct']:
                     color = COLOR_GREEN if res['conf'] > 0.8 else COLOR_CYAN
                 else:
-                    color = COLOR_RED # WRONG DRUG!
+                    color = COLOR_RED 
                 
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 
@@ -412,7 +431,7 @@ def main():
     hn_queue = deque(["HN123", "HN456"]) 
     current_hn = None
     
-    print(f"🚀 Started in {CFG.MODE} mode (Global Search).")
+    print(f"🚀 Started in {CFG.MODE} mode (Global Search + Profiling).")
     if CFG.MODE == "integrated":
         print("⌨️  Controls: [N] Next Patient | [Q] Quit")
 
@@ -432,7 +451,6 @@ def main():
                 if time.time() - ai.rx.complete_timestamp > 3.0:
                     print("🔄 Auto-resetting for next patient...")
                     ai.rx.reset()
-                    # No need to reset active_vectors anymore (Global Search)
         else:
             draw_text(display_frame, "PRESS 'N' FOR NEXT PATIENT", (380, 360), 0.8, (255, 0, 0, 255), 2)
 
@@ -447,9 +465,6 @@ def main():
             print(f"⏩ Switching to Next Patient: {current_hn}")
             
             ai.rx.reset()
-            # Note: We do NOT call prepare_search_space() anymore 
-            # because we are using the Global Set prepared at startup.
-            
             data = ai.his.fetch_prescription(current_hn)
             if data: 
                 ai.rx.update_from_his(data)
