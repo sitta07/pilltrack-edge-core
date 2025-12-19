@@ -21,7 +21,9 @@ from dataclasses import dataclass, field
 from typing import Tuple, List, Dict, Optional
 from ultralytics import YOLO
 from collections import deque
+import torch
 
+torch.set_num_threads(1)  # บังคับใช้ Core เดียว (ลด Overhead การสลับงาน)
 # --- IMPORT MODULES ---
 from his_connector import HISConnector
 
@@ -176,32 +178,13 @@ def draw_text(img, text, pos, scale=0.5, color=(255,255,255,255), thickness=1):
     cv2.putText(img, text, pos, FONT, scale, black, thickness+2)
     cv2.putText(img, text, pos, FONT, scale, color, thickness)
 
-# ================= 🔍 FEATURE ENGINE (OPTIMIZED FOR PI) =================
+# ================= 🔍 FEATURE ENGINE =================
 class FeatureEngine:
     def __init__(self):
         print("⏳ Loading DINOv2...")
-        # โหลดแบบปกติ
         self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
         self.model.eval().to(device)
-        
-        # --- 🚀 HERO FIX: OPTIMIZATION LOGIC ---
-        if device.type == 'cpu':
-            print("⚙️ CPU Detected (Raspberry Pi): Disabling FP16 & Enabling INT8 Quantization...")
-            
-            # 1. บังคับใช้ Float32 (ห้ามใช้ half บน Pi เด็ดขาด)
-            self.model = self.model.float()
-            
-            # 2. ทำ Dynamic Quantization (แปลงเป็น INT8 เพื่อความเร็วระดับ Turbo)
-            # ต้อง import torch.quantization ก่อน (ปกติ torch มีให้อยู่แล้ว)
-            self.model = torch.quantization.quantize_dynamic(
-                self.model, 
-                {torch.nn.Linear},  # Quantize เฉพาะ Layer ที่กินแรง
-                dtype=torch.qint8
-            )
-        else:
-            # ถ้ามี CUDA (PC) ค่อยใช้ half()
-            self.model = self.model.half()
-            
+        if device.type == 'cuda': self.model = self.model.half()
         self.sift = cv2.SIFT_create(nfeatures=500)
         
     def preprocess_batch(self, crop_list: List[np.ndarray]) -> np.ndarray:
@@ -209,8 +192,6 @@ class FeatureEngine:
         for i, img in enumerate(crop_list):
             img_rgb = img[:, :, :3] 
             img_resized = cv2.resize(img_rgb, (224, 224), interpolation=cv2.INTER_LINEAR)
-            
-            # ตรงนี้สำคัญ: ถ้าใช้ INT8 Model input ยังคงเป็น Float32 ได้ (มันจัดการเอง)
             img_norm = (img_resized.astype(np.float32) / 255.0 - CFG.MEAN) / CFG.STD
             batch[i] = img_norm.transpose(2, 0, 1)
         return batch
@@ -218,16 +199,9 @@ class FeatureEngine:
     @torch.no_grad()
     def extract_dino_batch(self, crop_list: List[np.ndarray]) -> np.ndarray:
         if not crop_list: return np.array([])
-        
         img_batch_np = self.preprocess_batch(crop_list)
         img_batch_t = torch.from_numpy(img_batch_np).to(device)
-        
-        # ❌ ลบ .half() ออกจากตรงนี้ด้วย
-        if device.type == 'cuda': 
-            img_batch_t = img_batch_t.half()
-        else:
-            img_batch_t = img_batch_t.float() # Pi ใช้ Float32 (แล้ว Quantization จะทำงานข้างในเอง)
-
+        if device.type == 'cuda': img_batch_t = img_batch_t.half()
         embeddings = self.model(img_batch_t)
         embeddings = F.normalize(embeddings, p=2, dim=1)
         return embeddings.cpu().float().numpy()
