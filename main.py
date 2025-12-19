@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-PILLTRACK – HYBRID ENGINE (DINO 85% + SIFT 15%)
+PILLTRACK – HYBRID ENGINE (OPTIMIZED BATCH + MATRIX)
 ✔ Detailed Console Logs (Human Readable)
 ✔ RGB8888 END-TO-END
 ✔ Checklist UI
+✔ Batch Inference & Vectorized Search
 """
 
 import os
@@ -16,10 +17,10 @@ import pickle
 import numpy as np
 import cv2
 import torch
+import torch.nn.functional as F
 
 from dataclasses import dataclass
 from typing import Tuple, List, Dict
-from torchvision import transforms
 from ultralytics import YOLO
 from sync_manager import SyncManager
 
@@ -43,6 +44,10 @@ class Config:
     W_DINO: float = 0.6
     W_SIFT: float = 0.4
     SIFT_SATURATION: int = 400
+    
+    # Preprocessing constants
+    MEAN: np.ndarray = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    STD: np.ndarray = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 CFG = Config()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -89,49 +94,68 @@ class PrescriptionManager:
                 return True
         return False
 
-# ================= 🎨 FEATURE ENGINE (HYBRID) =================
+# ================= 🎨 FEATURE ENGINE (OPTIMIZED) =================
 class FeatureEngine:
     def __init__(self):
-        # ใช้ vitb14 (ตัวใหญ่) ตาม Database เพื่อแก้ Error shape mismatch
+        print("⏳ Loading DINOv2 (ViT-B/14)...")
+        # Load model logic
         self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
         self.model.eval().to(device)
-        self.tf = transforms.Compose([
-            transforms.ToPILImage(),
-            transforms.Resize((224,224)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485,0.456,0.406], [0.229,0.224,0.225])
-        ])
-        
         self.sift = cv2.SIFT_create()
 
+    def preprocess_batch(self, crop_list):
+        """Optimized numpy-based preprocessing instead of Torchvision transforms"""
+        batch = []
+        for img in crop_list:
+            # Resize
+            img = cv2.resize(img, (224, 224))
+            # Normalize & Transpose (HWC -> CHW)
+            img = (img.astype(np.float32) / 255.0 - CFG.MEAN) / CFG.STD
+            img = img.transpose(2, 0, 1)
+            batch.append(img)
+        return np.array(batch)
+
     @torch.no_grad()
-    def extract(self, img):
-        # DINO
-        v = self.model(self.tf(img).unsqueeze(0).to(device))
-        v = v.flatten().cpu().numpy()
-        dino_vec = v / (np.linalg.norm(v)+1e-8)
+    def extract_dino_batch(self, crop_list):
+        if not crop_list: return np.array([])
         
-        # SIFT
+        # 1. Prepare Batch
+        img_batch_np = self.preprocess_batch(crop_list)
+        img_batch_t = torch.from_numpy(img_batch_np).to(device)
+        
+        # 2. Batch Inference (Fast!)
+        embeddings = self.model(img_batch_t)
+        
+        # 3. Normalize (L2) directly on tensor
+        embeddings = F.normalize(embeddings, p=2, dim=1)
+        
+        return embeddings.cpu().numpy()
+
+    def extract_sift(self, img):
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         _, sift_des = self.sift.detectAndCompute(gray, None)
-        
-        return dino_vec, sift_des
+        return sift_des
 
-# ================= 🤖 AI PROCESSOR =================
+# ================= 🤖 AI PROCESSOR (VECTORIZED) =================
 class AIProcessor:
     def __init__(self):
         self.rx = PrescriptionManager()
         self.engine = FeatureEngine()
-        self.db_dino = {} 
-        self.db_sift = {}
+        
+        # Flatten Database for Matrix Multiplication
+        self.db_vectors = []    # Matrix (N, 768)
+        self.db_names = []      # List of names corresponding to rows
+        self.db_sift_map = {}   # Dictionary for SIFT lookup
+        
         self.bf = cv2.BFMatcher()
         self.load_db()
+        
+        print("⏳ Loading YOLO...")
         self.yolo = YOLO(CFG.MODEL_PACK)
+        
         self.latest = None
         self.lock = threading.Lock()
         self.ms = 0
-        
-        # ตัวแปรสำหรับคุม Log ไม่ให้พิมพ์รัวเกินไป
         self.last_log_time = 0 
 
     def load_db(self):
@@ -142,26 +166,38 @@ class AIProcessor:
         with open(CFG.DB_PACKS_VEC,'rb') as f:
             raw = pickle.load(f)
             
-        print(f"📦 Loading Database: {len(raw)} items")
+        print(f"📦 Loading Database: {len(raw)} entries")
+        
+        # Flatten logic: Convert dict to big matrix
         for name, data in raw.items():
+            dino_list = []
             if isinstance(data, dict):
-                self.db_dino[name] = [np.array(v) for v in data.get('dino', [])]
-                self.db_sift[name] = data.get('sift', [])
+                dino_list = data.get('dino', [])
+                self.db_sift_map[name] = data.get('sift', [])
             elif isinstance(data, list):
-                self.db_dino[name] = [np.array(v) for v in data]
-                self.db_sift[name] = []
+                dino_list = data
+                self.db_sift_map[name] = []
+            
+            for vec in dino_list:
+                self.db_vectors.append(np.array(vec))
+                self.db_names.append(name)
+                
+        self.db_vectors = np.array(self.db_vectors) # (Total_Samples, 768)
+        # Normalize DB Matrix just in case
+        norms = np.linalg.norm(self.db_vectors, axis=1, keepdims=True)
+        self.db_vectors = self.db_vectors / (norms + 1e-8)
+        
+        print(f"⚡ Database Optimized: Matrix Shape {self.db_vectors.shape}")
 
     def get_sift_score(self, query_des, target_des_list):
         if query_des is None or not target_des_list: return 0.0
         max_score = 0.0
-        for target_des in target_des_list:
+        # Check only first few reliable targets to save time if list is long
+        for target_des in target_des_list[:5]: 
             if target_des is None: continue
             try:
                 matches = self.bf.knnMatch(query_des, target_des, k=2)
-                good = []
-                for m, n in matches:
-                    if m.distance < 0.75 * n.distance:
-                        good.append(m)
+                good = [m for m, n in matches if m.distance < 0.75 * n.distance]
                 score = min(len(good) / CFG.SIFT_SATURATION, 1.0)
                 if score > max_score: max_score = score
             except: continue
@@ -169,78 +205,97 @@ class AIProcessor:
 
     def process(self, frame):
         t0 = time.time()
-        img = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE))
-        res = self.yolo(img, conf=CFG.CONF_THRESHOLD, imgsz=CFG.AI_SIZE, verbose=False, task='segment')[0]
+        
+        # 1. YOLO Inference (Resize handled internally mostly, but explicit is safe)
+        img_resized = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE))
+        res = self.yolo(img_resized, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
 
-        if res.masks is None: return
+        if res.boxes is None or len(res.boxes) == 0: 
+            self.ms = (time.time()-t0)*1000
+            return
 
+        # 2. Collect Crops (Batch Preparation)
+        crops = []
+        valid_boxes = []
+        
         sx = CFG.DISPLAY_SIZE[0]/CFG.AI_SIZE
         sy = CFG.DISPLAY_SIZE[1]/CFG.AI_SIZE
 
-        for box, mask in zip(res.boxes, res.masks):
+        for box in res.boxes:
             x1,y1,x2,y2 = box.xyxy[0].int().tolist()
             rx1,ry1,rx2,ry2 = int(x1*sx),int(y1*sy),int(x2*sx),int(y2*sy)
             
-            crop = frame[ry1:ry2, rx1:rx2]
-            if crop.size == 0: continue
-
-            q_vec, q_des = self.engine.extract(crop)
-
-            # --- STEP 1: DINO Filter ---
-            candidates = []
-            for name, db_vecs in self.db_dino.items():
-                best_sim = -1.0
-                for v in db_vecs:
-                    sim = np.dot(q_vec, v)
-                    if sim > best_sim: best_sim = sim
-                if best_sim > 0.4:
-                    candidates.append((name, best_sim))
-
-            candidates.sort(key=lambda x: x[1], reverse=True)
-            top_k = candidates[:5]
-
-            # --- STEP 2: SIFT Refine ---
-            best_final_score = -1
-            best_label = "Unknown"
+            # Boundary check
+            h, w = frame.shape[:2]
+            ry1, ry2 = max(0, ry1), min(h, ry2)
+            rx1, rx2 = max(0, rx1), min(w, rx2)
             
-            # เก็บค่าแยกไว้แสดง Log
-            log_dino_score = 0.0
-            log_sift_score = 0.0
+            crop = frame[ry1:ry2, rx1:rx2]
+            if crop.size == 0 or crop.shape[0] < 10 or crop.shape[1] < 10: continue
+            
+            crops.append(crop)
+            valid_boxes.append((rx1, ry1, rx2, ry2))
 
-            for name, dino_score in top_k:
-                sift_score = self.get_sift_score(q_des, self.db_sift.get(name, []))
+        if not crops: return
+
+        # 3. DINO Batch Inference (Run ONCE for all pills)
+        # Returns Matrix (Num_Pills, 768)
+        batch_dino_vecs = self.engine.extract_dino_batch(crops)
+
+        # 4. Matrix Similarity Search (Vectorized)
+        # (Num_Pills, 768) @ (DB_Size, 768).T = (Num_Pills, DB_Size)
+        similarity_matrix = np.dot(batch_dino_vecs, self.db_vectors.T)
+
+        # Loop through each detected pill
+        for i, crop in enumerate(crops):
+            q_vec = batch_dino_vecs[i]
+            sim_scores = similarity_matrix[i]
+            
+            # Get Top 5 candidates indices
+            top_k_indices = np.argsort(sim_scores)[::-1][:5]
+            
+            # --- Candidate Refinement with SIFT ---
+            best_final_score = -1.0
+            best_label = "Unknown"
+            log_dino = 0.0
+            log_sift = 0.0
+            
+            # Compute SIFT only once per crop
+            q_des = self.engine.extract_sift(crop)
+
+            seen_names = set()
+            
+            for idx in top_k_indices:
+                candidate_name = self.db_names[idx]
+                dino_score = sim_scores[idx]
+                
+                # Skip duplicate name checks for same pill to save SIFT time
+                if candidate_name in seen_names: continue
+                seen_names.add(candidate_name)
+                
+                if dino_score < 0.4: continue # Early exit if DINO is low
+
+                sift_score = self.get_sift_score(q_des, self.db_sift_map.get(candidate_name, []))
                 final_score = (dino_score * CFG.W_DINO) + (sift_score * CFG.W_SIFT)
 
                 if final_score > best_final_score:
                     best_final_score = final_score
-                    best_label = name
-                    log_dino_score = dino_score
-                    log_sift_score = sift_score
+                    best_label = candidate_name
+                    log_dino = dino_score
+                    log_sift = sift_score
 
-            # --- LOGGING SECTION (พิมพ์ Log สวยๆ) ---
-            # พิมพ์ทุกๆ 2 วินาที หรือถ้าเจอยาที่มั่นใจมากๆ
-            current_time = time.time()
-            if (current_time - self.last_log_time > 1.0) and (best_final_score > 0.5):
-                self.last_log_time = current_time
-                
-                # แปลงเป็น % ให้ดูง่าย
-                total_pct = best_final_score * 100
-                dino_pct = log_dino_score * 100
-                sift_pct = log_sift_score * 100
-                
-                # แยกสี Log (เขียว=ผ่าน, เหลือง=เกือบ, แดง=ไม่ผ่าน)
-                status_icon = "✅" if best_final_score > 0.60 else "⚠️"
-                
-                print("-" * 50)
-                print(f"{status_icon} ผลการตรวจจับ: {best_label.upper()}")
-                print(f"   🏆 ความมั่นใจรวม: {total_pct:.1f}%")
-                print(f"   🔹 ความเหมือนรูปทรง (DINO): {dino_pct:.1f}%  (น้ำหนัก {CFG.W_DINO})")
-                print(f"   🔸 รายละเอียดจุดภาพ (SIFT): {sift_pct:.1f}%  (น้ำหนัก {CFG.W_SIFT})")
-                print("-" * 50)
-
-            # Decision
-            if best_final_score > 0.60: 
+            # --- LOGGING & DECISION ---
+            if best_final_score > 0.60:
                 self.rx.verify(best_label)
+                
+                # Visualize (Optional - minimal drawing here to save time)
+                # Drawing handled by UI mostly, but we can log
+                
+                current_time = time.time()
+                if (current_time - self.last_log_time > 1.0) and (best_final_score > 0.65):
+                    self.last_log_time = current_time
+                    status = "✅"
+                    print(f"{status} [{best_label.upper()}] Conf: {best_final_score*100:.1f}% (D:{log_dino*100:.0f} S:{log_sift*100:.0f})")
 
         self.ms = (time.time()-t0)*1000
 
@@ -251,8 +306,11 @@ class AIProcessor:
     def loop(self):
         while True:
             if self.latest is not None:
-                self.process(self.latest)
-            time.sleep(0.01)
+                # Use lock only when copying to prevent tearing, keep it brief
+                with self.lock:
+                    frame_to_process = self.latest.copy()
+                self.process(frame_to_process)
+            time.sleep(0.005) # Reduced sleep for faster response
 
 # ================= 📷 CAMERA =================
 class Camera:
@@ -294,7 +352,6 @@ def draw_ui(frame, rx):
         x = right_margin - tw
 
         draw_text(frame, text, (x, y), 0.55, color)
-
         if done:
             cv2.line(frame, (x, y-8), (x+tw, y-8), (0,255,0), 2)
         y += 28
@@ -312,17 +369,21 @@ if __name__ == "__main__":
     cv2.namedWindow("PillTrack", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("PillTrack", *CFG.DISPLAY_SIZE)
 
-    print("🚀 System Started (Hybrid Mode). Press 'q' to exit.")
+    print("🚀 System Started (Optimized Engine). Press 'q' to exit.")
 
     while True:
         frame = cam.get()
-        if frame is None:
-            continue
+        if frame is None: continue
 
-        ai.latest = frame.copy()
-        draw_ui(frame, ai.rx)
-        cv2.putText(frame, f"AI: {ai.ms:.1f}ms", (10, 20), FONT, 0.5, (0,255,255), 1)
-        cv2.imshow("PillTrack", frame)
+        # Thread-safe update
+        with ai.lock:
+            ai.latest = frame
+        
+        # Draw UI on the MAIN thread copy (to avoid modifying ai.latest being read)
+        display_frame = frame.copy()
+        draw_ui(display_frame, ai.rx)
+        cv2.putText(display_frame, f"AI: {ai.ms:.1f}ms", (10, 20), FONT, 0.5, (0,255,255), 1)
+        cv2.imshow("PillTrack", display_frame)
 
         if cv2.waitKey(1) == ord('q'):
             break
