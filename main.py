@@ -126,7 +126,7 @@ class FeatureEngine:
     
     def __init__(self):
         print("⏳ Loading DINOv2...")
-        self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+        self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
         self.model.eval().to(device)
         
         # Use half precision if GPU available for speed
