@@ -445,25 +445,25 @@ def draw_ui(frame: np.ndarray, ai_proc: AIProcessor):
         latency = ai_proc.ms
         avg_fps = np.mean(ai_proc.fps_history) if ai_proc.fps_history else 0
 
-    for result in current_results:
-        x1, y1, x2, y2 = result['box']
-        label = result['label'].upper()
-        confidence = result['conf']
+    # for result in current_results:
+    #     x1, y1, x2, y2 = result['box']
+    #     label = result['label'].upper()
+    #     confidence = result['conf']
         
-        # Color based on confidence
-        color = (0, 255, 0) if confidence > CFG.VERIFY_THRESHOLD else (0, 255, 255)
+    #     # Color based on confidence
+    #     color = (0, 255, 0) if confidence > CFG.VERIFY_THRESHOLD else (0, 255, 255)
         
-        # Draw box
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+    #     # Draw box
+    #     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
         
-        # Draw label background
-        tag = f"{label} {confidence:.2f}"
-        (tag_width, tag_height), _ = cv2.getTextSize(tag, FONT, 0.4, 1)
-        cv2.rectangle(frame, (x1, y1 - tag_height - 10), 
-                     (x1 + tag_width, y1), color, -1)
+    #     # Draw label background
+    #     tag = f"{label} {confidence:.2f}"
+    #     (tag_width, tag_height), _ = cv2.getTextSize(tag, FONT, 0.4, 1)
+    #     cv2.rectangle(frame, (x1, y1 - tag_height - 10), 
+    #                  (x1 + tag_width, y1), color, -1)
         
-        # Draw label text
-        cv2.putText(frame, tag, (x1, y1 - 5), FONT, 0.4, (0, 0, 0), 1)
+    #     # Draw label text
+    #     cv2.putText(frame, tag, (x1, y1 - 5), FONT, 0.4, (0, 0, 0), 1)
 
     # Draw performance stats
     draw_text(frame, f"AI: {latency:.1f}ms | FPS: {avg_fps:.1f}", 
