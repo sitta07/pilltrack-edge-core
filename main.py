@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-PILLTRACK – SENIOR EDITION (OPTIMIZED)
-✔ Conditional Pipeline: YOLO -> DINO/SIFT only if detected
-✔ Performance Optimizations:
-  - Frame skipping for AI processing
-  - Batch processing optimization
-  - Memory-efficient operations
-  - Reduced redundant computations
-  - Optimized SIFT matching
+PILLTRACK – SENIOR EDITION (FULLY OPTIMIZED - NO LAG)
+✔ Fixed: Stale results and slow box removal
+✔ Result timeout system
+✔ Adaptive frame skipping
+✔ Fast-path for no detections
 """
 
 import os
@@ -54,15 +51,19 @@ class Config:
     SIFT_SATURATION: int = 400
     
     # Performance settings
-    AI_FRAME_SKIP: int = 2  # Process every Nth frame
-    MAX_BATCH_SIZE: int = 8  # Max crops to process at once
-    SIFT_TOP_K: int = 3  # Reduced from 5
+    AI_FRAME_SKIP_IDLE: int = 3  # Skip when no detections
+    AI_FRAME_SKIP_ACTIVE: int = 1  # Skip when tracking objects
+    MAX_BATCH_SIZE: int = 8
+    SIFT_TOP_K: int = 3
     DINO_TOP_K: int = 5
     MIN_DINO_SCORE: float = 0.4
     VERIFY_THRESHOLD: float = 0.6
     
+    # Result timeout (ms) - Clear results if older than this
+    RESULT_TIMEOUT_MS: float = 300
+    
     # Display settings
-    UI_UPDATE_FPS: int = 20  # UI refresh rate
+    UI_UPDATE_FPS: int = 30  # Higher for smoother display
     
     # Normalization constants
     MEAN: np.ndarray = field(default_factory=lambda: np.array([0.485, 0.456, 0.406], dtype=np.float32))
@@ -133,23 +134,15 @@ class FeatureEngine:
         if device.type == 'cuda':
             self.model = self.model.half()
         
-        self.sift = cv2.SIFT_create(nfeatures=500)  # Limit features for speed
-        
-        # Pre-allocate tensors for common batch sizes
-        self.tensor_cache = {}
+        self.sift = cv2.SIFT_create(nfeatures=500)
 
     def preprocess_batch(self, crop_list: List[np.ndarray]) -> np.ndarray:
         """Batch preprocessing with optimizations"""
         batch = np.zeros((len(crop_list), 3, 224, 224), dtype=np.float32)
         
         for i, img in enumerate(crop_list):
-            # Resize once
             img_resized = cv2.resize(img, (224, 224), interpolation=cv2.INTER_LINEAR)
-            
-            # Normalize in one go
             img_norm = (img_resized.astype(np.float32) / 255.0 - CFG.MEAN) / CFG.STD
-            
-            # Transpose
             batch[i] = img_norm.transpose(2, 0, 1)
         
         return batch
@@ -160,15 +153,12 @@ class FeatureEngine:
         if not crop_list:
             return np.array([])
         
-        # Preprocess
         img_batch_np = self.preprocess_batch(crop_list)
         img_batch_t = torch.from_numpy(img_batch_np).to(device)
         
-        # Use half precision if available
         if device.type == 'cuda':
             img_batch_t = img_batch_t.half()
         
-        # Extract features
         embeddings = self.model(img_batch_t)
         embeddings = F.normalize(embeddings, p=2, dim=1)
         
@@ -182,7 +172,7 @@ class FeatureEngine:
 
 # ================= 🤖 AI PROCESSOR =================
 class AIProcessor:
-    """Main AI processing pipeline with optimizations"""
+    """Main AI processing pipeline with lag fixes"""
     
     def __init__(self):
         self.rx = PrescriptionManager()
@@ -199,18 +189,22 @@ class AIProcessor:
         print("⏳ Loading YOLO...")
         self.yolo = YOLO(CFG.MODEL_PACK)
         
-        # Threading
+        # Threading and state
         self.latest_frame = None
         self.results = []
+        self.result_timestamp = 0  # Track when results were last updated
         self.lock = threading.Lock()
         
         # Performance tracking
         self.ms = 0
-        self.frame_count = 0
         self.fps_history = deque(maxlen=30)
         
-        # Frame skipping
+        # Adaptive frame skipping
         self.process_counter = 0
+        self.has_active_detections = False
+        
+        # Running flag
+        self.running = True
 
     def load_db(self):
         """Load database of pill fingerprints"""
@@ -222,18 +216,14 @@ class AIProcessor:
             raw = pickle.load(f)
         
         for name, data in raw.items():
-            # Extract DINO vectors
             dino_list = data.get('dino', []) if isinstance(data, dict) else data
-            
-            # Extract SIFT descriptors
             sift_list = data.get('sift', []) if isinstance(data, dict) else []
-            self.db_sift_map[name] = sift_list[:CFG.SIFT_TOP_K]  # Limit SIFT
+            self.db_sift_map[name] = sift_list[:CFG.SIFT_TOP_K]
             
             for vec in dino_list:
                 self.db_vectors.append(np.array(vec))
                 self.db_names.append(name)
         
-        # Normalize database vectors
         self.db_vectors = np.array(self.db_vectors, dtype=np.float32)
         norms = np.linalg.norm(self.db_vectors, axis=1, keepdims=True)
         self.db_vectors = self.db_vectors / (norms + 1e-8)
@@ -242,7 +232,7 @@ class AIProcessor:
 
     def get_sift_score(self, query_des: Optional[np.ndarray], 
                        target_des_list: List[np.ndarray]) -> float:
-        """Calculate SIFT matching score (optimized)"""
+        """Calculate SIFT matching score"""
         if query_des is None or not target_des_list:
             return 0.0
         
@@ -253,10 +243,8 @@ class AIProcessor:
                 continue
                 
             try:
-                # Use knnMatch with k=2 for ratio test
                 matches = self.bf.knnMatch(query_des, target_des, k=2)
                 
-                # Lowe's ratio test
                 good = []
                 for match_pair in matches:
                     if len(match_pair) == 2:
@@ -264,11 +252,10 @@ class AIProcessor:
                         if m.distance < 0.75 * n.distance:
                             good.append(m)
                 
-                # Normalize score
                 score = min(len(good) / CFG.SIFT_SATURATION, 1.0)
                 max_score = max(max_score, score)
                 
-            except Exception as e:
+            except Exception:
                 continue
         
         return max_score
@@ -276,6 +263,7 @@ class AIProcessor:
     def process(self, frame: np.ndarray):
         """Process single frame through pipeline"""
         t0 = time.time()
+        current_time_ms = t0 * 1000
         
         # STAGE 1: YOLO Detection
         img_resized = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE), 
@@ -283,10 +271,12 @@ class AIProcessor:
         
         res = self.yolo(img_resized, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
 
-        # Early exit if no detections
+        # CRITICAL FIX: Immediately clear results if no detections
         if res.boxes is None or len(res.boxes) == 0:
             with self.lock:
                 self.results = []
+                self.result_timestamp = current_time_ms
+                self.has_active_detections = False
                 self.ms = (time.time() - t0) * 1000
             return
 
@@ -302,13 +292,11 @@ class AIProcessor:
         for box in res.boxes:
             x1, y1, x2, y2 = box.xyxy[0].int().tolist()
             
-            # Scale to display size
             dx1 = int(x1 * sx)
             dy1 = int(y1 * sy)
             dx2 = int(x2 * sx)
             dy2 = int(y2 * sy)
             
-            # Extract crop with bounds checking
             crop = frame[max(0, dy1):min(frame.shape[0], dy2), 
                         max(0, dx1):min(frame.shape[1], dx2)]
             
@@ -316,26 +304,19 @@ class AIProcessor:
                 crops.append(crop)
                 box_coords.append([dx1, dy1, dx2, dy2])
         
-        # Process crops in batches
+        # Process crops
         if crops:
-            # Batch DINOv2 extraction
             batch_dino = self.engine.extract_dino_batch(crops)
-            
-            # Compute similarity matrix
             sim_matrix = np.dot(batch_dino, self.db_vectors.T)
             
-            # Match each detection
             for i, crop in enumerate(crops):
                 sim_scores = sim_matrix[i]
                 
-                # Get top-K candidates
                 top_k_indices = np.argpartition(sim_scores, -CFG.DINO_TOP_K)[-CFG.DINO_TOP_K:]
                 top_k_indices = top_k_indices[np.argsort(sim_scores[top_k_indices])[::-1]]
                 
-                # Extract SIFT for query
                 q_des = self.engine.extract_sift(crop)
                 
-                # Find best match
                 best_label = "Unknown"
                 max_fusion = 0.0
                 seen_names = set()
@@ -343,44 +324,39 @@ class AIProcessor:
                 for idx in top_k_indices:
                     name = self.db_names[idx]
                     
-                    # Skip duplicates
                     if name in seen_names:
                         continue
                     seen_names.add(name)
                     
                     dino_score = sim_scores[idx]
                     
-                    # Early rejection
                     if dino_score < CFG.MIN_DINO_SCORE:
                         continue
                     
-                    # SIFT score
                     sift_score = self.get_sift_score(q_des, self.db_sift_map.get(name, []))
-                    
-                    # Fusion score
                     fusion_score = (dino_score * CFG.W_DINO) + (sift_score * CFG.W_SIFT)
                     
                     if fusion_score > max_fusion:
                         max_fusion = fusion_score
                         best_label = name
                 
-                # Store result
                 temp_results.append({
                     'box': box_coords[i],
                     'label': best_label,
                     'conf': max_fusion
                 })
                 
-                # Verify against prescription
                 if max_fusion > CFG.VERIFY_THRESHOLD:
                     self.rx.verify(best_label)
                 
                 print(f"📡 [TRACKING] {best_label} ({max_fusion:.2f})")
         
-        # Update results
+        # Update results with timestamp
         elapsed = (time.time() - t0) * 1000
         with self.lock:
             self.results = temp_results
+            self.result_timestamp = current_time_ms + elapsed
+            self.has_active_detections = len(temp_results) > 0
             self.ms = elapsed
             self.fps_history.append(1000.0 / elapsed if elapsed > 0 else 0)
 
@@ -390,12 +366,17 @@ class AIProcessor:
         return self
 
     def loop(self):
-        """Main processing loop with frame skipping"""
-        while True:
-            # Frame skipping for performance
+        """Main processing loop with adaptive frame skipping"""
+        while self.running:
             self.process_counter += 1
             
-            if self.process_counter >= CFG.AI_FRAME_SKIP:
+            # Adaptive frame skip: faster when tracking, slower when idle
+            skip_threshold = (CFG.AI_FRAME_SKIP_ACTIVE if self.has_active_detections 
+                            else CFG.AI_FRAME_SKIP_IDLE)
+            
+            should_process = self.process_counter >= skip_threshold
+            
+            if should_process:
                 self.process_counter = 0
                 
                 if self.latest_frame is not None:
@@ -404,11 +385,18 @@ class AIProcessor:
                     
                     self.process(work_frame)
             
-            time.sleep(0.001)  # Small sleep to prevent CPU spinning
+            # Small sleep to prevent CPU spinning
+            time.sleep(0.001)
+
+    def stop(self):
+        """Stop processing thread"""
+        self.running = False
 
 # ================= 🖥️ UI & DISPLAY =================
 def draw_ui(frame: np.ndarray, ai_proc: AIProcessor):
-    """Draw UI overlay on frame"""
+    """Draw UI overlay on frame with timeout check"""
+    
+    current_time_ms = time.time() * 1000
     
     # Draw checklist
     rx = ai_proc.rx
@@ -419,14 +407,11 @@ def draw_ui(frame: np.ndarray, ai_proc: AIProcessor):
         color = (0, 255, 0) if is_verified else (180, 180, 180)
         text = f"✔ {drug.upper()}" if is_verified else f"□ {drug.upper()}"
         
-        # Get text size
         (text_width, text_height), _ = cv2.getTextSize(text, FONT, 0.55, 2)
         
-        # Draw text
         x_pos = CFG.DISPLAY_SIZE[0] - text_width - 10
         draw_text(frame, text, (x_pos, y_pos), 0.55, color)
         
-        # Draw strikethrough if verified
         if is_verified:
             cv2.line(frame, (x_pos, y_pos - 8), 
                     (CFG.DISPLAY_SIZE[0] - 10, y_pos - 8), 
@@ -434,34 +419,38 @@ def draw_ui(frame: np.ndarray, ai_proc: AIProcessor):
         
         y_pos += 28
 
-    # Draw detection boxes
+    # Get results with lock
     with ai_proc.lock:
         current_results = ai_proc.results.copy()
+        result_timestamp = ai_proc.result_timestamp
         latency = ai_proc.ms
         avg_fps = np.mean(ai_proc.fps_history) if ai_proc.fps_history else 0
 
+    # CRITICAL FIX: Check if results are stale and clear them
+    result_age_ms = current_time_ms - result_timestamp
+    if result_age_ms > CFG.RESULT_TIMEOUT_MS:
+        current_results = []  # Don't draw stale boxes
+
+    # Draw detection boxes
     for result in current_results:
         x1, y1, x2, y2 = result['box']
         label = result['label'].upper()
         confidence = result['conf']
         
-        # Color based on confidence
         color = (0, 255, 0) if confidence > CFG.VERIFY_THRESHOLD else (0, 255, 255)
         
-        # Draw box
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
         
-        # Draw label background
         tag = f"{label} {confidence:.2f}"
         (tag_width, tag_height), _ = cv2.getTextSize(tag, FONT, 0.4, 1)
         cv2.rectangle(frame, (x1, y1 - tag_height - 10), 
                      (x1 + tag_width, y1), color, -1)
         
-        # Draw label text
         cv2.putText(frame, tag, (x1, y1 - 5), FONT, 0.4, (0, 0, 0), 1)
 
     # Draw performance stats
-    draw_text(frame, f"AI: {latency:.1f}ms | FPS: {avg_fps:.1f}", 
+    status = "TRACKING" if ai_proc.has_active_detections else "IDLE"
+    draw_text(frame, f"AI: {latency:.1f}ms | FPS: {avg_fps:.1f} | {status}", 
              (10, 20), 0.5, (0, 255, 255))
 
 # ================= 🚀 MAIN =================
@@ -495,6 +484,7 @@ def main():
         cap = cv2.VideoCapture(0)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, CFG.DISPLAY_SIZE[0])
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CFG.DISPLAY_SIZE[1])
+        cap.set(cv2.CAP_PROP_FPS, 30)
         
         def get_frame():
             ret, frame = cap.read()
@@ -514,31 +504,38 @@ def main():
     
     print("🚀 Starting main loop...")
     
-    while True:
-        # Capture frame
-        frame = get_frame()
-        if frame is None:
-            continue
+    try:
+        while True:
+            # Capture frame
+            frame = get_frame()
+            if frame is None:
+                continue
 
-        # Update latest frame for AI processing
-        with ai.lock:
-            ai.latest_frame = frame
+            # Update latest frame for AI processing
+            with ai.lock:
+                ai.latest_frame = frame
 
-        # Update UI at specified FPS
-        current_time = time.time()
-        if current_time - last_ui_time > ui_interval:
-            display_frame = frame.copy()
-            draw_ui(display_frame, ai)
-            cv2.imshow(window_name, display_frame)
-            last_ui_time = current_time
+            # Update UI at specified FPS
+            current_time = time.time()
+            if current_time - last_ui_time >= ui_interval:
+                display_frame = frame.copy()
+                draw_ui(display_frame, ai)
+                cv2.imshow(window_name, display_frame)
+                last_ui_time = current_time
 
-        # Check for quit
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-    # Cleanup
-    cv2.destroyAllWindows()
-    print("👋 Shutting down...")
+            # Check for quit
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                break
+    
+    except KeyboardInterrupt:
+        print("\n⚠️ Interrupted by user")
+    
+    finally:
+        # Cleanup
+        ai.stop()
+        cv2.destroyAllWindows()
+        print("👋 Shutting down...")
 
 if __name__ == "__main__":
     main()
