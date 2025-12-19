@@ -320,26 +320,30 @@ class AIProcessor:
                 box_coords.append([dx1, dy1, dx2, dy2])
         
        
+        # ค้นหาในเมธอด process ช่วง Stage 2: Feature Extraction & Matching
+
         if crops:
             batch_dino = self.engine.extract_dino_batch(crops)
-            
-            # --- [NEW: FAISS SEARCH] ---
-            # ค้นหา Top-K ที่ใกล้ที่สุดสำหรับทุก Crop ใน Batch เดียว
             scores, indices = self.index.search(batch_dino, k=CFG.DINO_TOP_K)
             
             for i, crop in enumerate(crops):
-                # scores[i] คือค่า Similarity, indices[i] คือตำแหน่งใน db_names
                 sim_scores = scores[i]
                 top_k_indices = indices[i]
                 
-                q_des = self.engine.extract_sift(crop)
-                
+                # --- [SENIOR OPTIMIZATION: EARLY SKIP] ---
+                # ถ้าตัวที่เหมือนที่สุด (Top 1) ยังมีคะแนนต่ำกว่าเกณฑ์พื้นฐาน 
+                # ไม่ต้องทำ SIFT ให้เสียเวลา ข้าม Crop นี้ไปเลย!
+                if np.max(sim_scores) < CFG.MIN_DINO_SCORE:
+                    continue
+
                 best_label = "Unknown"
                 max_fusion = 0.0
                 seen_names = set()
                 
+                # ตัวแปรเก็บ SIFT Descriptor (ดึงแค่ครั้งเดียวต่อ 1 Crop ถ้าเจอ Candidate ที่ผ่านเกณฑ์)
+                q_des = None 
+                
                 for idx_in_top_k, db_idx in enumerate(top_k_indices):
-                    # FAISS คืนค่า -1 ถ้าหาไม่เจอ
                     if db_idx == -1: continue
                     
                     name = self.db_names[db_idx]
@@ -348,8 +352,15 @@ class AIProcessor:
                     
                     dino_score = sim_scores[idx_in_top_k]
                     
-                    if dino_score < CFG.MIN_DINO_SCORE:
-                        continue
+                    # --- [SPECIFIC CANDIDATE SKIP] ---
+                    # ถ้า DINO Score ของ candidate ตัวนี้ต่ำกว่า 0.5 ไม่ต้องเอาไปคิด SIFT Fusion
+                    if dino_score < 0.5:
+                        # แต่ถ้าอยากให้มันยังติดอันดับ "Unknown" หรือคะแนนต่ำๆ ไว้ ก็แค่ continue
+                        continue 
+                    
+                    # สกัด SIFT เฉพาะตอนที่มี Candidate ผ่านเกณฑ์ DINO > 0.5 เท่านั้น
+                    if q_des is None:
+                        q_des = self.engine.extract_sift(crop)
                     
                     sift_score = self.get_sift_score(q_des, self.db_sift_map.get(name, []))
                     fusion_score = (dino_score * CFG.W_DINO) + (sift_score * CFG.W_SIFT)
