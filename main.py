@@ -288,6 +288,7 @@ class AIProcessor:
         return max_score
 
     def process(self, frame: np.ndarray):
+        # ถ้าไม่มีใบยา หรือทำงานเสร็จแล้ว หรือยังไม่โหลด Database -> ไม่ต้องทำ
         if not self.rx.is_ready or self.rx.is_completed: return
         if self.active_vectors is None: return
 
@@ -301,9 +302,10 @@ class AIProcessor:
         res = self.yolo(img_resized, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
         t_yolo = (time.perf_counter() - t_yolo_start) * 1000
 
+        # ถ้าไม่เจอยาเลย
         if res.boxes is None or len(res.boxes) == 0:
             with self.lock: self.results = []
-            print(f"⏱️ [IDLE] YOLO: {t_yolo:.1f}ms | No pills detected.")
+            # print(f"⏱️ [IDLE] YOLO: {t_yolo:.1f}ms | No pills detected.") # ปิด Log รกๆ ได้ถ้าต้องการ
             return
 
         # 2. Cropping
@@ -313,17 +315,20 @@ class AIProcessor:
         for box in res.boxes:
             x1, y1, x2, y2 = box.xyxy[0].int().tolist()
             dx1, dy1, dx2, dy2 = int(x1*sx), int(y1*sy), int(x2*sx), int(y2*sy)
+            # กันเหนียว: ตัดขอบไม่ให้เกินขนาดภาพ
             crop = frame[max(0, dy1):min(frame.shape[0], dy2), max(0, dx1):min(frame.shape[1], dx2)]
-            if crop.size > 0: crops.append(crop); box_coords.append([dx1, dy1, dx2, dy2])
+            if crop.size > 0: 
+                crops.append(crop)
+                box_coords.append([dx1, dy1, dx2, dy2])
         t_crop = (time.perf_counter() - t_crop_start) * 1000
 
         temp_results = []
         t_dino = 0
         t_search = 0
-        t_sift_accum = 0 # Accumulate SIFT time per pill
+        t_sift_accum = 0 
 
         if crops:
-            # 3. DINOv2
+            # 3. DINOv2 Extraction (ONNX)
             t_dino_start = time.perf_counter()
             batch_dino = self.engine.extract_dino_batch(crops) 
             t_dino = (time.perf_counter() - t_dino_start) * 1000
@@ -331,52 +336,67 @@ class AIProcessor:
             # 4. Global Search & Verification
             t_search_start = time.perf_counter()
             
-            # Vector Search
+            # Vector Search (Dot Product)
             sim_matrix = np.dot(batch_dino, self.active_vectors)
             
             for i, crop in enumerate(crops):
+                # หาตัวที่เหมือนที่สุดใน Database
                 best_idx = np.argmax(sim_matrix[i])
                 dino_score = sim_matrix[i][best_idx]
                 
-                if dino_score < CFG.MIN_DINO_SCORE: continue
+                # ถ้าคะแนน DINO ต่ำเตี้ยเรี่ยดินจริงๆ (เช่น 0.2) อาจจะเป็นขยะ ไม่ใช่ยา -> ข้ามไปเลย
+                if dino_score < CFG.MIN_DINO_SCORE: 
+                    continue
                 
                 matched_name = self.active_names[best_idx]
                 
-                # --- SIFT Specific Timer ---
+                # --- SIFT Verification ---
                 t_sift_start = time.perf_counter()
                 q_des = self.engine.extract_sift(crop)
                 sift_score = self.get_sift_score(q_des, self.full_db_sift.get(matched_name, []))
                 t_sift_accum += (time.perf_counter() - t_sift_start) * 1000
-                # ---------------------------
+                # -------------------------
                 
+                # คำนวณคะแนนรวม
                 fusion = (dino_score * CFG.W_DINO) + (sift_score * CFG.W_SIFT)
                 
+                # --- LOGIC การแสดงผล (แก้ไขใหม่) ---
+                display_name = "Unknown"
+                is_correct_drug = False
+                
                 if fusion > CFG.VERIFY_THRESHOLD:
+                    # กรณี: มั่นใจว่าเป็นยานี้แน่ๆ
                     is_correct_drug = matched_name in self.rx.target_drugs
                     
                     if is_correct_drug:
+                        # ถูกต้อง: เป็นยาในใบสั่ง
                         display_name = self.rx.target_drugs[matched_name]['original']
-                        self.rx.verify(matched_name)
+                        self.rx.verify(matched_name) # ติ๊กถูกในลิสต์
                     else:
+                        # ผิด: เป็นยาที่มีใน Database แต่ไม่อยู่ในใบสั่ง
                         display_name = matched_name.upper()
-                    
-                    temp_results.append({
-                        'box': box_coords[i], 
-                        'label': display_name, 
-                        'conf': fusion,
-                        'is_correct': is_correct_drug
-                    })
+                else:
+                    # กรณี: ไม่มั่นใจ (คะแนนต่ำ) -> ให้โชว์เครื่องหมาย ? พร้อมคะแนน
+                    display_name = f"? ({fusion:.2f})"
+                    is_correct_drug = False # ถือว่าผิดไว้ก่อน
+                
+                # Append ลงผลลัพธ์เสมอ (เพื่อให้ UI วาดกรอบ)
+                temp_results.append({
+                    'box': box_coords[i], 
+                    'label': display_name, 
+                    'conf': fusion,
+                    'is_correct': is_correct_drug
+                })
             
             t_search = (time.perf_counter() - t_search_start) * 1000
 
+        # อัปเดตผลลัพธ์ไปยัง Thread หลัก
         with self.lock:
             self.results = temp_results
 
         # --- FINAL LOGGING ---
         t_total = (time.perf_counter() - t_start_total) * 1000
-        # t_search includes SIFT time, so we display SIFT separately for clarity
-        print(f"⏱️ TOTAL: {t_total:.1f}ms | YOLO: {t_yolo:.1f}ms | DINO: {t_dino:.1f}ms | SIFT: {t_sift_accum:.1f}ms | Search(Mix): {t_search:.1f}ms")
-
+        print(f"⏱️ TOTAL: {t_total:.1f}ms | YOLO: {t_yolo:.1f} | DINO: {t_dino:.1f} | SIFT: {t_sift_accum:.1f} | Search: {t_search:.1f}")
     def start(self):
         threading.Thread(target=self.loop, daemon=True).start()
         return self
