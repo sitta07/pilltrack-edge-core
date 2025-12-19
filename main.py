@@ -38,7 +38,7 @@ with open("config.yaml", "r") as f:
 
 @dataclass
 class Config:
-    MODEL_PACK: str = yaml_cfg['artifacts']['model']
+    MODEL_PACK: str = os.path.abspath(yaml_cfg['artifacts']['model'])
     DB_PACKS_VEC: str = "database/pill_fingerprints.pkl"
     DRUG_LIST_JSON: str = yaml_cfg['artifacts']['drug_list']
     DISPLAY_SIZE: Tuple[int, int] = (
@@ -182,37 +182,45 @@ class FeatureEngine:
 
 # ================= 🤖 AI PROCESSOR =================
 class AIProcessor:
-    """Main AI processing pipeline with optimizations"""
+    """
+    Main AI processing pipeline optimized for OpenVINO and performance profiling.
+    """
     
     def __init__(self):
         self.rx = PrescriptionManager()
         self.engine = FeatureEngine()
         
-        # Database
+        # Database & Matching
         self.db_vectors = []
         self.db_names = []
         self.db_sift_map = {}
         self.bf = cv2.BFMatcher()
         self.load_db()
         
-        # YOLO model
-        print("⏳ Loading YOLO...")
-        self.yolo = YOLO(CFG.MODEL_PACK)
+        # YOLO model (OpenVINO optimized)
+        print(f"⏳ Loading Optimized YOLO from: {CFG.MODEL_PACK}")
+        try:
+            # ชี้ไปที่โฟลเดอร์ OpenVINO ที่ export มา
+            self.yolo = YOLO(CFG.MODEL_PACK, task="detect")
+            print("✅ YOLO (OpenVINO) Loaded Successfully!")
+        except Exception as e:
+            print(f"❌ Failed to load model: {e}")
+            print("💡 Tip: Ensure path points to the FOLDER containing .xml and .bin files")
+            # Fallback (optional)
+            # self.yolo = YOLO("best.pt") 
         
-        # Threading
+        # Threading & State
         self.latest_frame = None
         self.results = []
         self.lock = threading.Lock()
         
-        # Performance tracking
+        # Performance tracking metrics
         self.ms = 0
-        self.frame_count = 0
         self.fps_history = deque(maxlen=30)
-        
-        # Frame skipping
         self.process_counter = 0
 
     def load_db(self):
+        """Loads the feature database and initializes FAISS index."""
         if not os.path.exists(CFG.DB_PACKS_VEC):
             print("⚠️ Database not found!")
             return
@@ -231,74 +239,53 @@ class AIProcessor:
                 self.db_names.append(name)
         
         vectors = np.array(vectors, dtype=np.float32)
-        # Normalize vectors สำหรับ Cosine Similarity
         faiss.normalize_L2(vectors)
         
-        # --- [NEW: FAISS INDEX SETUP] ---
         dim = vectors.shape[1]
-        # ใช้ IndexFlatIP (Inner Product) เพราะเรา Normalize แล้ว จะได้ค่าเดียวกับ Cosine Similarity
         self.index = faiss.IndexFlatIP(dim)
         self.index.add(vectors)
-        # --------------------------------
-        
         print(f"✅ FAISS Index Built: {len(vectors)} vectors")
 
     def get_sift_score(self, query_des: Optional[np.ndarray], 
                        target_des_list: List[np.ndarray]) -> float:
-        """Calculate SIFT matching score (optimized)"""
+        """Calculates optimized SIFT matching score."""
         if query_des is None or not target_des_list:
             return 0.0
         
         max_score = 0.0
-        
         for target_des in target_des_list:
             if target_des is None or len(target_des) < 2:
                 continue
-                
             try:
-                # Use knnMatch with k=2 for ratio test
                 matches = self.bf.knnMatch(query_des, target_des, k=2)
-                
-                # Lowe's ratio test
-                good = []
-                for match_pair in matches:
-                    if len(match_pair) == 2:
-                        m, n = match_pair
-                        if m.distance < 0.75 * n.distance:
-                            good.append(m)
-                
-                # Normalize score
+                good = [m for m_pair in matches if len(m_pair) == 2 
+                        and m_pair[0].distance < 0.75 * m_pair[1].distance]
                 score = min(len(good) / CFG.SIFT_SATURATION, 1.0)
                 max_score = max(max_score, score)
-                
-            except Exception as e:
+            except:
                 continue
-        
         return max_score
 
     def process(self, frame: np.ndarray):
         """
-        Main AI Processing Pipeline with Full Profiling
-        ระบบจะวัดเวลา 5 จุดหลักเพื่อหาคอขวด (Bottleneck)
+        Core pipeline with performance profiling.
         """
-        # เริ่มจับเวลาภาพรวม
         t_start = time.perf_counter()
-        prof_data = {}
+        prof = {}
 
-        # --- [STAGE 1: YOLO DETECTION] ---
+        # --- STAGE 1: YOLO Detection ---
         t0 = time.perf_counter()
         img_resized = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE), interpolation=cv2.INTER_LINEAR)
         res = self.yolo(img_resized, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
-        prof_data['1_yolo'] = (time.perf_counter() - t0) * 1000
+        prof['yolo'] = (time.perf_counter() - t0) * 1000
 
-        # Early exit: ถ้าไม่เจอยาเลย ให้รีบคืนค่าเพื่อประหยัดทรัพยากร
         if res.boxes is None or len(res.boxes) == 0:
             with self.lock:
                 self.results = []
                 self.ms = (time.perf_counter() - t_start) * 1000
             return
 
-        # --- [STAGE 2: PREPROCESSING & CROPS PREPARATION] ---
+        # --- STAGE 2: Cropping ---
         t1 = time.perf_counter()
         temp_results = []
         sx, sy = CFG.DISPLAY_SIZE[0] / CFG.AI_SIZE, CFG.DISPLAY_SIZE[1] / CFG.AI_SIZE
@@ -307,44 +294,32 @@ class AIProcessor:
         for box in res.boxes:
             x1, y1, x2, y2 = box.xyxy[0].int().tolist()
             dx1, dy1, dx2, dy2 = int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy)
-            
-            # Crop image ด้วยพิกัดที่คำนวณใหม่
             crop = frame[max(0, dy1):min(frame.shape[0], dy2), 
                         max(0, dx1):min(frame.shape[1], dx2)]
-            
             if crop.size > 0:
                 crops.append(crop)
                 box_coords.append([dx1, dy1, dx2, dy2])
-        prof_data['2_cropping'] = (time.perf_counter() - t1) * 1000
+        prof['crop'] = (time.perf_counter() - t1) * 1000
 
-        # --- [STAGE 3: DINOv2 BATCH INFERENCE] ---
-        # การทำเป็น Batch จะเร็วกว่าการทำทีละรูปมากใน GPU
+        # --- STAGE 3: DINOv2 & FAISS ---
         t2 = time.perf_counter()
         if crops:
             batch_dino = self.engine.extract_dino_batch(crops)
-            prof_data['3_dino_inf'] = (time.perf_counter() - t2) * 1000
-            
-            # --- [STAGE 4: FAISS VECTOR SEARCH] ---
-            # ค้นหา Candidate ที่ใกล้เคียงที่สุดจากฐานข้อมูล
-            t3 = time.perf_counter()
             scores, indices = self.index.search(batch_dino, k=CFG.DINO_TOP_K)
-            prof_data['4_faiss_search'] = (time.perf_counter() - t3) * 1000
+            prof['dino_faiss'] = (time.perf_counter() - t2) * 1000
             
-            # --- [STAGE 5: SIFT FUSION LOOP] ---
-            # จุดนี้คือ "High Risk" ที่สุดเพราะเป็น CPU-bound loop
-            t4 = time.perf_counter()
+            # --- STAGE 4: Fusion Loop (SIFT) ---
+            t3 = time.perf_counter()
             for i, crop in enumerate(crops):
                 sim_scores = scores[i]
                 top_k_indices = indices[i]
                 
-                # Senior Optimization: Early skip ถ้าตัวที่คล้ายสุดยังห่วยเกินไป
+                # Senior Skip: ถ้าตัวที่คล้ายที่สุดยังห่วย ไม่ต้องเสียเวลาทำ SIFT
                 if np.max(sim_scores) < CFG.MIN_DINO_SCORE:
                     continue
 
-                best_label = "Unknown"
-                max_fusion = 0.0
-                seen_names = set()
-                q_des = None 
+                best_label, max_fusion = "Unknown", 0.0
+                seen_names, q_des = set(), None
                 
                 for idx_in_top_k, db_idx in enumerate(top_k_indices):
                     if db_idx == -1: continue
@@ -353,64 +328,43 @@ class AIProcessor:
                     seen_names.add(name)
                     
                     dino_score = sim_scores[idx_in_top_k]
-                    
-                    # Optimization: ทำ SIFT เฉพาะตัวที่ DINO คัดมาแล้วว่าพอมีความหวัง (> 0.5)
+                    # Only do SIFT if DINO is somewhat confident
                     if dino_score > 0.5:
-                        if q_des is None:
-                            q_des = self.engine.extract_sift(crop)
-                        
+                        if q_des is None: q_des = self.engine.extract_sift(crop)
                         sift_score = self.get_sift_score(q_des, self.db_sift_map.get(name, []))
-                        fusion_score = (dino_score * CFG.W_DINO) + (sift_score * CFG.W_SIFT)
-                        
-                        if fusion_score > max_fusion:
-                            max_fusion = fusion_score
-                            best_label = name
+                        fusion = (dino_score * CFG.W_DINO) + (sift_score * CFG.W_SIFT)
+                        if fusion > max_fusion:
+                            max_fusion, best_label = fusion, name
                 
-                temp_results.append({
-                    'box': box_coords[i],
-                    'label': best_label,
-                    'conf': max_fusion
-                })
-                
+                temp_results.append({'box': box_coords[i], 'label': best_label, 'conf': max_fusion})
                 if max_fusion > CFG.VERIFY_THRESHOLD:
                     self.rx.verify(best_label)
             
-            prof_data['5_sift_loop'] = (time.perf_counter() - t4) * 1000
+            prof['fusion'] = (time.perf_counter() - t3) * 1000
         
-        # คำนวณเวลารวม
+        # --- Final Update ---
         total_ms = (time.perf_counter() - t_start) * 1000
-        prof_data['total'] = total_ms
-
-        # สรุปผลการ Profile ลง Console เพื่อให้เรา Optimize ต่อได้ถูกจุด
-        print(f"📊 Profiling: Total {total_ms:.1f}ms | YOLO: {prof_data['1_yolo']:.1f}ms | SIFT: {prof_data['5_sift_loop']:.1f}ms")
-
-        # อัปเดตสถานะเพื่อนำไปแสดงผลบน UI
+        print(f"📊 [YOLO: {prof['yolo']:.1f}ms] [Fusion: {prof.get('fusion', 0):.1f}ms] Total: {total_ms:.1f}ms")
+        
         with self.lock:
             self.results = temp_results
             self.ms = total_ms
             self.fps_history.append(1000.0 / total_ms if total_ms > 0 else 0)
 
     def start(self):
-        """Start processing thread"""
         threading.Thread(target=self.loop, daemon=True).start()
         return self
 
     def loop(self):
-        """Main processing loop with frame skipping"""
         while True:
-            # Frame skipping for performance
             self.process_counter += 1
-            
             if self.process_counter >= CFG.AI_FRAME_SKIP:
                 self.process_counter = 0
-                
                 if self.latest_frame is not None:
                     with self.lock:
                         work_frame = self.latest_frame.copy()
-                    
                     self.process(work_frame)
-            
-            time.sleep(0.001)  # Small sleep to prevent CPU spinning
+            time.sleep(0.001)
 
 # ================= 🖥️ UI & DISPLAY =================
 def draw_ui(frame: np.ndarray, ai_proc: AIProcessor):

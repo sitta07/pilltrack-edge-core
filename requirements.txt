@@ -21,3 +21,4 @@ loguru
 pydantic            
 onnxruntime
 faiss-cpu
+openvino
