@@ -22,3 +22,6 @@ pydantic
 onnxruntime
 faiss-cpu
 openvino
+fastapi
+uvicorn
+requests

@@ -2,31 +2,41 @@
 # PILLTRACK SYSTEM CONFIGURATION (Hybrid Engine: DINO + SIFT)
 # =============================================================
 
+# --- 🚀 [NEW] Operation Mode: เลือกโหมดการทำงาน ---
+operation:
+  mode: "integrated"        # ตัวเลือก: "standalone" (ตรวจอิสระ) หรือ "integrated" (ตรวจตามใบสั่ง)
+  allow_mismatch: false     # ถ้าตรวจแล้วยาไม่ตรงใบสั่ง จะให้ผ่านไหม? (Senior ต้องคิดเผื่อ Error)
+
+# --- 🏥 [NEW] HIS API Connection: การเชื่อมต่อระบบโรงพยาบาล ---
+his_api:
+  base_url: "http://127.0.0.1:8000"  # URL ของ Mock API ที่เราจะรันใน Terminal 1
+  endpoints:
+    get_prescription: "/get-prescription/"
+  timeout: 5                         # ป้องกันโปรแกรมค้างถ้า Server โรงพยาบาลตอบช้า
+
 # --- 📦 Artifacts: ไฟล์สำคัญที่ต้อง Sync ขึ้น S3 ---
 artifacts:
-  model: "models/seg_best_process.pt"      # YOLOv8 weights สำหรับ Segmentation
-  pack_vec: "database/pill_fingerprints.pkl" # [แก้แล้ว] ชื่อไฟล์ใหม่ที่มีทั้ง DINO และ SIFT ข้างใน
-  drug_list: "database/drug_list.json"     # Metadata รายชื่อยา
+  model: "models/seg_best_process.pt"      
+  pack_vec: "database/pill_fingerprints.pkl" 
+  drug_list: "database/drug_list.json"     
 
 # --- 📂 Paths: โครงสร้างโฟลเดอร์ ---
 paths:
-  db_images: "database_images"             # เก็บรูปต้นฉบับ (Producer only)
+  db_images: "database_images"             
   models_folder: "models"                  
   db_pkl_folder: "database"                
 
-# --- ⚙️ Settings: จูนค่า AI ---
+# --- ⚙️ Settings: จูนค่า AI (คงไว้ตามเดิมของคุณ) ---
 settings:
-  dino_size: 448                           # ขนาด Input DINO (ถ้า Pi ช้า ลดเหลือ 224 ได้)
-  yolo_conf: 0.25                          # ความมั่นใจขั้นต่ำของ YOLO
-  
-  # [NEW] Hybrid Engine Weights (รวมกันต้องได้ 1.0)
-  w_dino: 0.70                             # ให้ความสำคัญกับรูปลักษณ์รวม (DINO) 70%
-  w_sift: 0.30                             # ให้ความสำคัญกับจุดรายละเอียด (SIFT) 30%
-  sift_saturation: 20                      # จำนวนจุด SIFT match ที่จะถือว่า "เหมือนเป๊ะ" (Score=1.0)
-  efficiency_target: 40                    # เป้าหมายจำนวนภาพต่อ Class
+  dino_size: 448                           
+  yolo_conf: 0.6                          
+  w_dino: 0.70                             
+  w_sift: 0.30                             
+  sift_saturation: 20                      
+  efficiency_target: 40                    
 
 # --- 🖥️ UI & Display ---
 display:
   width: 1280
   height: 720
-  ui_zone_x: 850                           # จุดเริ่ม UI Zone ฝั่งขวา
+  ui_zone_x: 850

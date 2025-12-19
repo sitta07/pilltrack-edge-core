@@ -1,0 +1,15 @@
+{
+  "HN123": {
+    "patient_name": "Sitta Senior",
+    "prescription": [
+      {"drug_id": "P001", "name": "uroflow", "amount": 2},
+      {"drug_id": "A005", "name": "flotral", "amount": 1}
+    ]
+  },
+  "HN456": {
+    "patient_name": "John Doe",
+    "prescription": [
+      {"drug_id": "M002", "name": "imnib400", "amount": 1}
+    ]
+  }
+}
