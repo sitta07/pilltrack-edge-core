@@ -340,15 +340,18 @@ class AIProcessor:
             sim_matrix = np.dot(batch_dino, self.active_vectors)
             
             for i, crop in enumerate(crops):
-                # หาตัวที่เหมือนที่สุดใน Database
                 best_idx = np.argmax(sim_matrix[i])
                 dino_score = sim_matrix[i][best_idx]
                 
-                # ถ้าคะแนน DINO ต่ำเตี้ยเรี่ยดินจริงๆ (เช่น 0.2) อาจจะเป็นขยะ ไม่ใช่ยา -> ข้ามไปเลย
-                if dino_score < CFG.MIN_DINO_SCORE: 
-                    continue
+                # ❌ คอมเมนต์บรรทัดนี้ทิ้งไปก่อน (Disable Filter)
+                # if dino_score < CFG.MIN_DINO_SCORE: 
+                #     continue
                 
+                # ✅ เพิ่ม Print เพื่อดูว่าจริงๆ แล้วได้คะแนนเท่าไหร่?
                 matched_name = self.active_names[best_idx]
+                print(f"🧐 Debug: Box {i} matched '{matched_name}' with DINO score: {dino_score:.4f}")
+
+                # ... (ส่วน SIFT เหมือนเดิม) ...
                 
                 # --- SIFT Verification ---
                 t_sift_start = time.perf_counter()
