@@ -277,112 +277,116 @@ class AIProcessor:
         return max_score
 
     def process(self, frame: np.ndarray):
-        """Process single frame through pipeline"""
+        """
+        [SENIOR PROCESS PIPELINE]
+        Optimized for Real-time Inference on Edge Devices
+        """
         t0 = time.time()
-        
-        # STAGE 1: YOLO Detection
-        img_resized = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE), 
-                                 interpolation=cv2.INTER_LINEAR)
-        
-        res = self.yolo(img_resized, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
+        ih, iw = frame.shape[:2] # ขนาด Original ของกล้อง (e.g., 640x480)
 
-        # Early exit if no detections
+        # --- STAGE 1: YOLO DETECTION ---
+        # Resize ครั้งเดียวสำหรับ AI Inference
+        img_ai = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE), interpolation=cv2.INTER_LINEAR)
+        res = self.yolo(img_ai, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
+
         if res.boxes is None or len(res.boxes) == 0:
             with self.lock:
                 self.results = []
                 self.ms = (time.time() - t0) * 1000
             return
 
-        # STAGE 2: Feature Extraction & Matching
+        # --- STAGE 2: ADAPTIVE CROPPING (BBOX) ---
         temp_results = []
-        sx = CFG.DISPLAY_SIZE[0] / CFG.AI_SIZE
-        sy = CFG.DISPLAY_SIZE[1] / CFG.AI_SIZE
-        
         crops = []
-        box_coords = []
+        box_coords_display = []
         
-        # Collect crops
+        # คำนวณ Scale Factor เพื่อแปลงพิกัดจาก AI Size (416) กลับไป Original Frame
+        scale_x = iw / CFG.AI_SIZE
+        scale_y = ih / CFG.AI_SIZE
+
         for box in res.boxes:
-            x1, y1, x2, y2 = box.xyxy[0].int().tolist()
+            # พิกัดจาก YOLO (416x416)
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
             
-            # Scale to display size
-            dx1 = int(x1 * sx)
-            dy1 = int(y1 * sy)
-            dx2 = int(x2 * sx)
-            dy2 = int(y2 * sy)
-            
-            # Extract crop with bounds checking
-            crop = frame[max(0, dy1):min(frame.shape[0], dy2), 
-                        max(0, dx1):min(frame.shape[1], dx2)]
+            # แปลงกลับเป็นพิกัดจริงบน Frame
+            rx1, ry1, rx2, ry2 = x1 * scale_x, y1 * scale_y, x2 * scale_x, y2 * scale_y
+            bw, bh = rx2 - rx1, ry2 - ry1
+
+            # Senior Tip: เพิ่ม Padding 15% เพื่อให้ Model เห็นขอบยาชัดขึ้น
+            pad_w, pad_h = bw * 0.15, bh * 0.15
+            px1 = max(0, int(rx1 - pad_w))
+            py1 = max(0, int(ry1 - pad_h))
+            px2 = min(iw, int(rx2 + pad_w))
+            py2 = min(ih, int(ry2 + pad_h))
+
+            crop = frame[py1:py2, px1:px2]
             
             if crop.size > 0:
                 crops.append(crop)
-                box_coords.append([dx1, dy1, dx2, dy2])
-        
-       
-        # ค้นหาในเมธอด process ช่วง Stage 2: Feature Extraction & Matching
+                # เก็บพิกัดสำหรับวาด UI (Scaled to Display Config)
+                # สมมติว่า Display Size กับ Original Frame อาจต่างกัน
+                ui_sx = CFG.DISPLAY_SIZE[0] / iw
+                ui_sy = CFG.DISPLAY_SIZE[1] / ih
+                box_coords_display.append([
+                    int(rx1 * ui_sx), int(ry1 * ui_sy), 
+                    int(rx2 * ui_sx), int(ry2 * ui_sy)
+                ])
 
+        # --- STAGE 3: BATCH FEATURE EXTRACTION & SEARCH ---
         if crops:
-            batch_dino = self.engine.extract_dino_batch(crops)
-            scores, indices = self.index.search(batch_dino, k=CFG.DINO_TOP_K)
+            # ใช้ Batch Processing ของ DINOv2 (ลด Overhead ของ GPU/CPU)
+            batch_embeddings = self.engine.extract_dino_batch(crops)
             
-            for i, crop in enumerate(crops):
-                sim_scores = scores[i]
-                top_k_indices = indices[i]
-                
-                # --- [SENIOR OPTIMIZATION: EARLY SKIP] ---
-                # ถ้าตัวที่เหมือนที่สุด (Top 1) ยังมีคะแนนต่ำกว่าเกณฑ์พื้นฐาน 
-                # ไม่ต้องทำ SIFT ให้เสียเวลา ข้าม Crop นี้ไปเลย!
+            # FAISS Vector Search (Inner Product / Cosine Similarity)
+            # scores = similarity, indices = index ใน database
+            scores, indices = self.index.search(batch_embeddings, k=CFG.DINO_TOP_K)
+            
+            for i, (sim_scores, top_k_indices) in enumerate(zip(scores, indices)):
+                # Early Exit 1: ถ้าตัวที่เหมือนที่สุดยังคะแนนต่ำกว่าเกณฑ์ ข้ามทันที
                 if np.max(sim_scores) < CFG.MIN_DINO_SCORE:
                     continue
 
                 best_label = "Unknown"
                 max_fusion = 0.0
                 seen_names = set()
+                q_des = None # Lazy loading สำหรับ SIFT
                 
-                # ตัวแปรเก็บ SIFT Descriptor (ดึงแค่ครั้งเดียวต่อ 1 Crop ถ้าเจอ Candidate ที่ผ่านเกณฑ์)
-                q_des = None 
-                
-                for idx_in_top_k, db_idx in enumerate(top_k_indices):
+                for idx_in_k, db_idx in enumerate(top_k_indices):
                     if db_idx == -1: continue
                     
                     name = self.db_names[db_idx]
                     if name in seen_names: continue
                     seen_names.add(name)
                     
-                    dino_score = sim_scores[idx_in_top_k]
-                    
-                    # --- [SPECIFIC CANDIDATE SKIP] ---
-                    # ถ้า DINO Score ของ candidate ตัวนี้ต่ำกว่า 0.5 ไม่ต้องเอาไปคิด SIFT Fusion
-                    if dino_score < 0.5:
-                        # แต่ถ้าอยากให้มันยังติดอันดับ "Unknown" หรือคะแนนต่ำๆ ไว้ ก็แค่ continue
-                        continue 
-                    
-                    # สกัด SIFT เฉพาะตอนที่มี Candidate ผ่านเกณฑ์ DINO > 0.5 เท่านั้น
-                    if q_des is None:
-                        q_des = self.engine.extract_sift(crop)
-                    
-                    sift_score = self.get_sift_score(q_des, self.db_sift_map.get(name, []))
-                    fusion_score = (dino_score * CFG.W_DINO) + (sift_score * CFG.W_SIFT)
-                    
+                    dino_score = sim_scores[idx_in_k]
+
+                    # Early Exit 2: ถ้า DINO มั่นใจมาก (> 0.85) อาจจะไม่ต้องพึ่ง SIFT (ประหยัด CPU)
+                    # แต่ถ้าคะแนนปานกลาง ให้ใช้ SIFT มาช่วย Confirm
+                    if 0.5 < dino_score < 0.85:
+                        if q_des is None:
+                            q_des = self.engine.extract_sift(crops[i])
+                        
+                        sift_score = self.get_sift_score(q_des, self.db_sift_map.get(name, []))
+                        fusion_score = (dino_score * CFG.W_DINO) + (sift_score * CFG.W_SIFT)
+                    else:
+                        fusion_score = dino_score # ใช้ DINO score ตรงๆ
+
                     if fusion_score > max_fusion:
                         max_fusion = fusion_score
                         best_label = name
                 
-                # Store result
-                temp_results.append({
-                    'box': box_coords[i],
-                    'label': best_label,
-                    'conf': max_fusion
-                })
-                
-                # Verify against prescription
-                if max_fusion > CFG.VERIFY_THRESHOLD:
-                    self.rx.verify(best_label)
-                
-                print(f"📡 [TRACKING] {best_label} ({max_fusion:.2f})")
-        
-        # Update results
+                if max_fusion > 0.4: # Final Threshold
+                    temp_results.append({
+                        'box': box_coords_display[i],
+                        'label': best_label,
+                        'conf': max_fusion
+                    })
+                    
+                    # Verify กับใบสั่งยา
+                    if max_fusion > CFG.VERIFY_THRESHOLD:
+                        self.rx.verify(best_label)
+
+        # --- STAGE 4: STATE UPDATE ---
         elapsed = (time.time() - t0) * 1000
         with self.lock:
             self.results = temp_results
