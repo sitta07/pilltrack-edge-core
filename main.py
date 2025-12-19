@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PILLTRACK – SENIOR EDITION (STRICT RGB8888 + NEXT PATIENT QUEUE)
-✔ Pipeline is 100% RGB8888 (RGBA 32-bit)
-✔ Feature: Press 'N' to switch to next patient (Rotation Queue)
-✔ Feature: Auto-complete & Targeted Search
+PILLTRACK – GLOBAL SEARCH EDITION (FULL DATABASE)
+✔ Pipeline: RGB8888 (RGBA 32-bit)
+✔ Search: Scans against ENTIRE database (not just prescription)
+✔ UI: Highlights correct drugs (Green) vs Wrong drugs (Red)
 """
 
 import os
@@ -22,7 +22,7 @@ from typing import Tuple, List, Dict, Optional
 from ultralytics import YOLO
 from collections import deque
 
-# --- [NEW IMPORT] ---
+# --- IMPORT MODULES ---
 from his_connector import HISConnector
 
 try:
@@ -58,7 +58,7 @@ class Config:
     
     # Performance
     AI_FRAME_SKIP: int = 2
-    MIN_DINO_SCORE: float = 0.4
+    MIN_DINO_SCORE: float = 0.45  # Increased slightly for global search safety
     VERIFY_THRESHOLD: float = 0.65 
     
     # Normalization (RGB based)
@@ -69,7 +69,7 @@ CFG = Config()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
-# ================= 📷 CAMERA HANDLER (RGB8888 STRICT) =================
+# ================= 📷 CAMERA HANDLER =================
 class CameraHandler:
     def __init__(self, width=1280, height=720):
         self.width = width
@@ -81,14 +81,13 @@ class CameraHandler:
         try:
             from picamera2 import Picamera2
             self.picam = Picamera2()
-            # FORCE XRGB8888 format (32-bit Packed RGB)
             config = self.picam.create_preview_configuration(
                 main={"size": (self.width, self.height), "format": "XRGB8888"}
             )
             self.picam.configure(config)
             self.picam.start()
             self.use_picamera = True
-            print("📷 Camera: Using Picamera2 (XRGB8888 / 32-bit)")
+            print("📷 Camera: Using Picamera2 (XRGB8888)")
         except Exception as e:
             print(f"⚠️ Picamera2 failed. Falling back to OpenCV. {e}")
             self.use_picamera = False
@@ -102,7 +101,6 @@ class CameraHandler:
         else:
             ret, frame = self.cap.read()
             if not ret: return None
-            # OpenCV gives BGR, convert to RGBA (RGB8888)
             return cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
 
     def release(self):
@@ -148,11 +146,14 @@ class PrescriptionManager:
         if self.is_completed: return False
         
         norm_det = normalize_name(detected_name)
+        
+        # Check if the detected drug is in the prescription
         if norm_det in self.target_drugs:
             self.target_drugs[norm_det]['found'] = 1
             self.check_complete()
-            return True
-        return False
+            return True # Found correct drug
+        
+        return False # Found wrong drug
 
     def check_complete(self):
         all_found = all(d['found'] > 0 for d in self.target_drugs.values())
@@ -176,7 +177,6 @@ def normalize_name(name: str) -> str:
     return name
 
 def draw_text(img, text, pos, scale=0.5, color=(255,255,255,255), thickness=1):
-    # Colors must be 4-tuples for RGBA
     black = (0, 0, 0, 255)
     cv2.putText(img, text, pos, FONT, scale, black, thickness+2)
     cv2.putText(img, text, pos, FONT, scale, color, thickness)
@@ -223,11 +223,14 @@ class AIProcessor:
         
         self.full_db_vectors = {} 
         self.full_db_sift = {}
+        
+        # ACTIVE VECTORS now holds the ENTIRE DB
         self.active_vectors = None
         self.active_names = []
         
         self.bf = cv2.BFMatcher()
         self.load_db()
+        self.prepare_global_search_space() # Load once, use everywhere
         
         print("⏳ Loading YOLO...")
         self.yolo = YOLO(CFG.MODEL_PACK)
@@ -251,19 +254,20 @@ class AIProcessor:
             
         print(f"✅ Database loaded: {len(self.full_db_vectors)} drugs available.")
 
-    def prepare_search_space(self):
-        if not self.rx.target_drugs: return
+    def prepare_global_search_space(self):
+        """Builds a search matrix containing EVERY drug in the database."""
+        if not self.full_db_vectors: return
         vectors, names = [], []
-        for norm_name in self.rx.target_drugs.keys():
-            if norm_name in self.full_db_vectors:
-                for vec in self.full_db_vectors[norm_name]:
-                    vectors.append(vec)
-                    names.append(norm_name)
+        
+        for norm_name, vec_list in self.full_db_vectors.items():
+            for vec in vec_list:
+                vectors.append(vec)
+                names.append(norm_name)
         
         if vectors:
             self.active_vectors = np.array(vectors, dtype=np.float32).T 
             self.active_names = names
-            print(f"🎯 Optimized Search Space: {len(names)} vectors.")
+            print(f"🌍 Global Search Active: Scanning against {len(names)} vectors (Full DB).")
         else:
             self.active_vectors = None
 
@@ -278,25 +282,18 @@ class AIProcessor:
         return max_score
 
     def process(self, frame: np.ndarray):
-        # Frame is RGBA (4 channels)
         if not self.rx.is_ready or self.rx.is_completed: return
         if self.active_vectors is None: return
 
-        t_start = time.perf_counter()
-        
-        # --- 1. YOLO Detection ---
         t1 = time.perf_counter()
         img_rgb = frame[:, :, :3]
         img_resized = cv2.resize(img_rgb, (CFG.AI_SIZE, CFG.AI_SIZE))
         res = self.yolo(img_resized, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
-        t_yolo = (time.perf_counter() - t1) * 1000
 
         if res.boxes is None or len(res.boxes) == 0:
             with self.lock: self.results = []
             return
 
-        # --- 2. Cropping ---
-        t2 = time.perf_counter()
         sx, sy = CFG.DISPLAY_SIZE[0] / CFG.AI_SIZE, CFG.DISPLAY_SIZE[1] / CFG.AI_SIZE
         crops, box_coords = [], []
         for box in res.boxes:
@@ -304,19 +301,12 @@ class AIProcessor:
             dx1, dy1, dx2, dy2 = int(x1*sx), int(y1*sy), int(x2*sx), int(y2*sy)
             crop = frame[max(0, dy1):min(frame.shape[0], dy2), max(0, dx1):min(frame.shape[1], dx2)]
             if crop.size > 0: crops.append(crop); box_coords.append([dx1, dy1, dx2, dy2])
-        t_crop = (time.perf_counter() - t2) * 1000
 
         temp_results = []
-        t_dino, t_match = 0, 0
-
         if crops:
-            # --- 3. DINOv2 Extraction ---
-            t3 = time.perf_counter()
             batch_dino = self.engine.extract_dino_batch(crops) 
-            t_dino = (time.perf_counter() - t3) * 1000
             
-            # --- 4. Targeted Matching ---
-            t4 = time.perf_counter()
+            # Match against GLOBAL database
             sim_matrix = np.dot(batch_dino, self.active_vectors)
             
             for i, crop in enumerate(crops):
@@ -333,21 +323,25 @@ class AIProcessor:
                 
                 fusion = (dino_score * CFG.W_DINO) + (sift_score * CFG.W_SIFT)
                 
-                temp_results.append({
-                    'box': box_coords[i], 
-                    'label': self.rx.target_drugs[matched_name]['original'], 
-                    'conf': fusion
-                })
-                
                 if fusion > CFG.VERIFY_THRESHOLD:
-                    self.rx.verify(matched_name)
-            
-            t_match = (time.perf_counter() - t4) * 1000
+                    # Determine display name and correctness
+                    is_correct_drug = matched_name in self.rx.target_drugs
+                    
+                    if is_correct_drug:
+                        display_name = self.rx.target_drugs[matched_name]['original']
+                        self.rx.verify(matched_name) # Check off the list
+                    else:
+                        display_name = matched_name.upper() # Found something else!
+                    
+                    temp_results.append({
+                        'box': box_coords[i], 
+                        'label': display_name, 
+                        'conf': fusion,
+                        'is_correct': is_correct_drug
+                    })
 
         with self.lock:
             self.results = temp_results
-
-        print(f"⏱️ [PROF] YOLO: {t_yolo:.1f}ms | Crop: {t_crop:.1f}ms | DINO: {t_dino:.1f}ms | Match: {t_match:.1f}ms")
 
     def start(self):
         threading.Thread(target=self.loop, daemon=True).start()
@@ -365,12 +359,11 @@ class AIProcessor:
 def draw_ui(frame: np.ndarray, ai_proc: AIProcessor):
     rx = ai_proc.rx
     
-    # Define Colors (R, G, B, A)
     COLOR_CYAN = (0, 255, 255, 255)
     COLOR_YELLOW = (255, 255, 0, 255)
     COLOR_GREEN = (0, 255, 0, 255)
     COLOR_GRAY = (150, 150, 150, 255)
-    COLOR_RED = (255, 0, 0, 255)
+    COLOR_RED = (0, 0, 255, 255) # Red for wrong drugs
     
     status_color = COLOR_GREEN if rx.is_completed else COLOR_CYAN
     status_text = "COMPLETED - RESETTING..." if rx.is_completed else f"PATIENT: {rx.patient_name}"
@@ -391,9 +384,19 @@ def draw_ui(frame: np.ndarray, ai_proc: AIProcessor):
         with ai_proc.lock:
             for res in ai_proc.results:
                 x1, y1, x2, y2 = res['box']
-                color = COLOR_GREEN if res['conf'] > CFG.VERIFY_THRESHOLD else COLOR_CYAN
+                # Determine Color: Green/Cyan if correct, RED if wrong
+                if res['is_correct']:
+                    color = COLOR_GREEN if res['conf'] > 0.8 else COLOR_CYAN
+                else:
+                    color = COLOR_RED # WRONG DRUG!
+                
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                draw_text(frame, f"{res['label']} {res['conf']:.2f}", (x1, y1-5), 0.4, color, 1)
+                
+                label_text = f"{res['label']} {res['conf']:.2f}"
+                if not res['is_correct']:
+                    label_text = f"WRONG: {res['label']}"
+                    
+                draw_text(frame, label_text, (x1, y1-5), 0.4, color, 1)
 
 # ================= 🚀 MAIN =================
 def main():
@@ -406,11 +409,10 @@ def main():
 
     ai = AIProcessor().start()
     
-    # --- [NEW] Patient Queue for Demo ---
-    hn_queue = deque(["HN123", "HN456"]) # เพิ่ม HN789 ได้ถ้ามีข้อมูล
+    hn_queue = deque(["HN123", "HN456"]) 
     current_hn = None
     
-    print(f"🚀 Started in {CFG.MODE} mode (RGB8888 Strict).")
+    print(f"🚀 Started in {CFG.MODE} mode (Global Search).")
     if CFG.MODE == "integrated":
         print("⌨️  Controls: [N] Next Patient | [Q] Quit")
 
@@ -426,35 +428,31 @@ def main():
         if ai.rx.is_ready:
             draw_ui(display_frame, ai)
             
-            # Auto-Reset Logic
             if ai.rx.is_completed:
                 if time.time() - ai.rx.complete_timestamp > 3.0:
                     print("🔄 Auto-resetting for next patient...")
                     ai.rx.reset()
-                    ai.active_vectors = None 
+                    # No need to reset active_vectors anymore (Global Search)
         else:
             draw_text(display_frame, "PRESS 'N' FOR NEXT PATIENT", (380, 360), 0.8, (255, 0, 0, 255), 2)
 
-        # Show (Strict RGB8888)
-        cv2.imshow("PillTrack HIS (RGB8888)", display_frame)
+        cv2.imshow("PillTrack HIS (Global Search)", display_frame)
         
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'): 
             break
         elif key == ord('n') and CFG.MODE == "integrated":
-            # --- NEXT PATIENT LOGIC ---
-            hn_queue.rotate(-1) # เลื่อนคิว
+            hn_queue.rotate(-1)
             current_hn = hn_queue[0]
             print(f"⏩ Switching to Next Patient: {current_hn}")
             
-            # Reset & Fetch
             ai.rx.reset()
-            ai.active_vectors = None
+            # Note: We do NOT call prepare_search_space() anymore 
+            # because we are using the Global Set prepared at startup.
             
             data = ai.his.fetch_prescription(current_hn)
             if data: 
                 ai.rx.update_from_his(data)
-                ai.prepare_search_space() 
             else:
                 print(f"❌ Failed to fetch data for {current_hn}")
 
