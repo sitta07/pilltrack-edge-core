@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PILLTRACK – SENIOR EDITION (HIS INTEGRATED)
+PILLTRACK – SENIOR EDITION (HIS INTEGRATED + ROBUST CAMERA)
 ✔ Supports Standalone & Integrated (HIS) Modes
+✔ Auto-detects Raspberry Pi Camera (Picamera2) vs USB Webcam (OpenCV)
 ✔ Real-time Cross-check with Hospital Prescription
-✔ Performance Optimized for Raspberry Pi
 """
 
 import os
@@ -71,7 +71,60 @@ CFG = Config()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
-# ================= 🧠 PRESCRIPTION MANAGER (MODIFIED) =================
+# ================= 📷 CAMERA HANDLER (NEW) =================
+class CameraHandler:
+    """
+    Handles camera initialization safely.
+    Prioritizes Picamera2 (for RPi 5) -> Falls back to OpenCV (for Mac/PC/USB)
+    """
+    def __init__(self, width=1280, height=720):
+        self.width = width
+        self.height = height
+        self.use_picamera = False
+        self.cap = None
+        self.picam = None
+        
+        # Try importing Picamera2
+        try:
+            from picamera2 import Picamera2
+            self.picam = Picamera2()
+            config = self.picam.create_preview_configuration(
+                main={"size": (self.width, self.height), "format": "RGB888"}
+            )
+            self.picam.configure(config)
+            self.picam.start()
+            self.use_picamera = True
+            print("📷 Camera: Using Picamera2 (Libcamera)")
+        except Exception as e:
+            print(f"⚠️ Picamera2 not found or failed ({e}). Falling back to OpenCV.")
+            self.use_picamera = False
+            self.cap = cv2.VideoCapture(0)
+            if not self.cap.isOpened():
+                raise RuntimeError("❌ Could not open any camera (Picamera2 failed, OpenCV failed).")
+            
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            print("📷 Camera: Using OpenCV VideoCapture(0)")
+
+    def get_frame(self):
+        if self.use_picamera:
+            # Picamera2 returns array directly (RGB usually, OpenCV needs BGR)
+            frame = self.picam.capture_array()
+            # Picamera2 often gives RGB, OpenCV needs BGR for imshow
+            return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        else:
+            ret, frame = self.cap.read()
+            if not ret:
+                return None
+            return frame
+
+    def release(self):
+        if self.use_picamera:
+            self.picam.stop()
+        elif self.cap:
+            self.cap.release()
+
+# ================= 🧠 PRESCRIPTION MANAGER =================
 class PrescriptionManager:
     """Manages drug validation based on HIS or Local DB"""
     
@@ -126,7 +179,7 @@ def normalize_name(name: str) -> str:
     name = re.sub(r'[^a-z0-9]', '', name)
     return name
 
-# ================= 🔍 FEATURE ENGINE (YOUR ORIGINAL) =================
+# ================= 🔍 FEATURE ENGINE =================
 class FeatureEngine:
     def __init__(self):
         print("⏳ Loading DINOv2...")
@@ -303,10 +356,12 @@ def main():
         try: SyncManager().sync()
         except: pass
 
-    # Camera Setup (Picamera2 / OpenCV)
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CFG.DISPLAY_SIZE[0])
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CFG.DISPLAY_SIZE[1])
+    # Initialize Camera Handler (Safe Mode)
+    try:
+        camera = CameraHandler(width=CFG.DISPLAY_SIZE[0], height=CFG.DISPLAY_SIZE[1])
+    except RuntimeError as e:
+        print(f"❌ FATAL ERROR: {e}")
+        return
 
     ai = AIProcessor().start()
     
@@ -315,8 +370,12 @@ def main():
         print("⌨️ Press 'H' to fetch prescription for HN123")
 
     while True:
-        ret, frame = cap.read()
-        if not ret: continue
+        frame = camera.get_frame()
+        if frame is None:
+            # เพิ่ม Log เพื่อแจ้งเตือนว่าอ่านภาพไม่ได้ (อาจจะแค่เฟรมกระตุก หรือหลุด)
+            print("⚠️ Warning: Empty frame received. Retrying...")
+            time.sleep(0.1)
+            continue
         
         ai.latest_frame = frame
         display_frame = frame.copy()
@@ -332,10 +391,11 @@ def main():
         if key == ord('q'): break
         elif key == ord('h') and CFG.MODE == "integrated":
             # จำลองการส่ง HN123 ไปดึงข้อมูล
+            print("🔄 Fetching data...")
             data = ai.his.fetch_prescription("HN123")
             if data: ai.rx.update_from_his(data)
 
-    cap.release()
+    camera.release()
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
