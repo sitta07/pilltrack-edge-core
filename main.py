@@ -356,7 +356,7 @@ def draw_ui(frame, rx):
             cv2.line(frame, (x, y-8), (x+tw, y-8), (0,255,0), 2)
         y += 28
 
-# ================= 🚀 MAIN =================
+# ================= 🚀 MAIN (OPTIMIZED DISPLAY) =================
 if __name__ == "__main__":
     try:
         SyncManager().sync()
@@ -369,23 +369,44 @@ if __name__ == "__main__":
     cv2.namedWindow("PillTrack", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("PillTrack", *CFG.DISPLAY_SIZE)
 
-    print("🚀 System Started (Optimized Engine). Press 'q' to exit.")
+    print("🚀 System Started (Hybrid Engine). Display @ 10 FPS. Press 'q' to exit.")
+
+    # --- ⚙️ CONFIG FPS ---
+    DISPLAY_FPS = 10
+    display_interval = 1.0 / DISPLAY_FPS
+    last_display_time = 0
 
     while True:
         frame = cam.get()
         if frame is None: continue
 
-        # Thread-safe update
+        # 1. ส่งภาพให้ AI ประมวลผล (ทำทุกเฟรม เพื่อความแม่นยำสูงสุด)
+        #    AI Thread จะหยิบไปใช้เองเมื่อมันว่าง
         with ai.lock:
             ai.latest = frame
         
-        # Draw UI on the MAIN thread copy (to avoid modifying ai.latest being read)
-        display_frame = frame.copy()
-        draw_ui(display_frame, ai.rx)
-        cv2.putText(display_frame, f"AI: {ai.ms:.1f}ms", (10, 20), FONT, 0.5, (0,255,255), 1)
-        cv2.imshow("PillTrack", display_frame)
-
-        if cv2.waitKey(1) == ord('q'):
-            break
+        # 2. ควบคุมการแสดงผลให้เหลือแค่ 10 FPS (ประหยัดพลังงาน Pi)
+        current_time = time.time()
+        if current_time - last_display_time > display_interval:
+            
+            # Draw UI เฉพาะตอนที่จะแสดงผลเท่านั้น (ลด workload CPU)
+            display_frame = frame.copy()
+            draw_ui(display_frame, ai.rx)
+            
+            # โชว์ข้อมูล debug
+            cv2.putText(display_frame, f"AI: {ai.ms:.1f}ms", (10, 20), FONT, 0.5, (0,255,255), 1)
+            cv2.putText(display_frame, f"Disp: 10FPS", (10, 40), FONT, 0.5, (200,200,200), 1)
+            
+            cv2.imshow("PillTrack", display_frame)
+            
+            # อัปเดตเวลาล่าสุด
+            last_display_time = current_time
+            
+            # เช็คปุ่มกดเฉพาะตอนแสดงผล (1ms)
+            if cv2.waitKey(1) == ord('q'):
+                break
+        
+        else:
+            time.sleep(0.001) 
             
     cv2.destroyAllWindows()
