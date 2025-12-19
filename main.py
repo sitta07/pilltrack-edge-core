@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-PILLTRACK – SENIOR EDITION (HYBRID ENGINE + LIVE VISUALIZATION)
-✔ Real-time Bounding Boxes & Labels
-✔ Thread-safe shared results
-✔ Matrix Vectorized Search + SIFT Refinement
-✔ 10FPS UI / Full-speed AI Inference
+PILLTRACK – SENIOR EDITION (CONDITIONAL PIPELINE)
+✔ YOLO First -> DINO/SIFT only if detected
+✔ Fixed Window Size (1280x720)
+✔ Real-time Logging & Detections
 """
 
 import os
@@ -119,7 +118,7 @@ class FeatureEngine:
         _, sift_des = self.sift.detectAndCompute(gray, None)
         return sift_des
 
-# ================= 🤖 AI PROCESSOR =================
+# ================= 🤖 AI PROCESSOR (OPTIMIZED LOGIC) =================
 class AIProcessor:
     def __init__(self):
         self.rx = PrescriptionManager()
@@ -134,7 +133,7 @@ class AIProcessor:
         self.yolo = YOLO(CFG.MODEL_PACK)
         
         self.latest_frame = None
-        self.results = []  # Stores: [{'box': [x1,y1,x2,y2], 'label': str, 'conf': float}]
+        self.results = []
         self.lock = threading.Lock()
         self.ms = 0
 
@@ -166,60 +165,60 @@ class AIProcessor:
 
     def process(self, frame):
         t0 = time.time()
+        
+        # 1. YOLO FIRST (Stage 1)
         img_resized = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE))
         res = self.yolo(img_resized, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
 
+        # Senior Logic: ถ้า YOLO ไม่เจออะไรเลย ให้จบงานทันที
+        if res.boxes is None or len(res.boxes) == 0:
+            with self.lock:
+                self.results = []
+                self.ms = (time.time()-t0)*1000
+            return
+
+        # 2. FEATURE EXTRACTION (Stage 2 - Only if Stage 1 passed)
         temp_results = []
-        if res.boxes is not None:
-            sx = CFG.DISPLAY_SIZE[0]/CFG.AI_SIZE
-            sy = CFG.DISPLAY_SIZE[1]/CFG.AI_SIZE
-            
-            crops = []
-            box_coords = []
-            
-            for box in res.boxes:
-                x1,y1,x2,y2 = box.xyxy[0].int().tolist()
-                # Scale to Display Size
-                dx1, dy1, dx2, dy2 = int(x1*sx), int(y1*sy), int(x2*sx), int(y2*sy)
-                
-                crop = frame[max(0, dy1):min(frame.shape[0], dy2), max(0, dx1):min(frame.shape[1], dx2)]
-                if crop.size == 0: continue
-                
+        sx = CFG.DISPLAY_SIZE[0]/CFG.AI_SIZE
+        sy = CFG.DISPLAY_SIZE[1]/CFG.AI_SIZE
+        
+        crops = []
+        box_coords = []
+        
+        for box in res.boxes:
+            x1,y1,x2,y2 = box.xyxy[0].int().tolist()
+            dx1, dy1, dx2, dy2 = int(x1*sx), int(y1*sy), int(x2*sx), int(y2*sy)
+            crop = frame[max(0, dy1):min(frame.shape[0], dy2), max(0, dx1):min(frame.shape[1], dx2)]
+            if crop.size > 0:
                 crops.append(crop)
                 box_coords.append([dx1, dy1, dx2, dy2])
 
-            if crops:
-                batch_dino = self.engine.extract_dino_batch(crops)
-                sim_matrix = np.dot(batch_dino, self.db_vectors.T)
+        if crops:
+            batch_dino = self.engine.extract_dino_batch(crops)
+            sim_matrix = np.dot(batch_dino, self.db_vectors.T)
 
-                for i, crop in enumerate(crops):
-                    sim_scores = sim_matrix[i]
-                    top_k = np.argsort(sim_scores)[::-1][:5]
-                    
-                    q_des = self.engine.extract_sift(crop)
-                    best_label, max_f = "Unknown", 0.0
-                    
-                    seen = set()
-                    for idx in top_k:
-                        name = self.db_names[idx]
-                        if name in seen: continue
-                        seen.add(name)
-                        
-                        d_score = sim_scores[idx]
-                        if d_score < 0.4: continue
-                        
-                        s_score = self.get_sift_score(q_des, self.db_sift_map.get(name, []))
-                        f_score = (d_score * CFG.W_DINO) + (s_score * CFG.W_SIFT)
-                        
-                        if f_score > max_f:
-                            max_f = f_score
-                            best_label = name
+            for i, crop in enumerate(crops):
+                sim_scores = sim_matrix[i]
+                top_k = np.argsort(sim_scores)[::-1][:5]
+                q_des = self.engine.extract_sift(crop)
+                
+                best_label, max_f = "Unknown", 0.0
+                seen = set()
+                for idx in top_k:
+                    name = self.db_names[idx]
+                    if name in seen: continue
+                    seen.add(name)
+                    d_score = sim_scores[idx]
+                    if d_score < 0.4: continue
+                    s_score = self.get_sift_score(q_des, self.db_sift_map.get(name, []))
+                    f_score = (d_score * CFG.W_DINO) + (s_score * CFG.W_SIFT)
+                    if f_score > max_f:
+                        max_f = f_score
+                        best_label = name
 
-                    temp_results.append({'box': box_coords[i], 'label': best_label, 'conf': max_f})
-                    if max_f > 0.6: self.rx.verify(best_label)
-                    
-                    # Log ตลอดเวลา (Continuous Logging)
-                    print(f"📡 Tracking: {best_label} | Score: {max_f:.2f}")
+                temp_results.append({'box': box_coords[i], 'label': best_label, 'conf': max_f})
+                if max_f > 0.6: self.rx.verify(best_label)
+                print(f"📡 [TRACKING] {best_label} ({max_f:.2f})")
 
         with self.lock:
             self.results = temp_results
@@ -239,7 +238,7 @@ class AIProcessor:
 
 # ================= 🖥️ UI & DISPLAY =================
 def draw_ui(frame, ai_proc):
-    # 1. Draw Checklist
+    # Draw Checklist
     rx = ai_proc.rx
     y = 40
     for drug in rx.all_drugs:
@@ -251,32 +250,24 @@ def draw_ui(frame, ai_proc):
         if done: cv2.line(frame, (CFG.DISPLAY_SIZE[0]-tw-10, y-8), (CFG.DISPLAY_SIZE[0]-10, y-8), (0,255,0), 2)
         y += 28
 
-    # 2. Draw Detections (Bounding Boxes)
+    # Draw Boxes
     with ai_proc.lock:
-        current_results = ai_proc.results
+        curr_res = ai_proc.results
         latency = ai_proc.ms
 
-    for res in current_results:
+    for res in curr_res:
         x1, y1, x2, y2 = res['box']
-        lbl = res['label'].upper()
-        cf = res['conf']
-        
-        # Color based on confidence
+        lbl, cf = res['label'].upper(), res['conf']
         color = (0, 255, 0) if cf > 0.6 else (0, 255, 255)
-        
-        # Draw Box
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        
-        # Draw Label Tag
         tag = f"{lbl} {cf:.2f}"
         (tw, th), _ = cv2.getTextSize(tag, FONT, 0.4, 1)
         cv2.rectangle(frame, (x1, y1-th-10), (x1+tw, y1), color, -1)
         cv2.putText(frame, tag, (x1, y1-5), FONT, 0.4, (0,0,0), 1)
 
-    # Status Info
     draw_text(frame, f"AI: {latency:.1f}ms", (10, 20), 0.5, (0,255,255))
 
-# ================= 🚀 RUN =================
+# ================= 🚀 MAIN =================
 if __name__ == "__main__":
     try: SyncManager().sync()
     except: pass
@@ -290,30 +281,31 @@ if __name__ == "__main__":
         def get_frame(): return cam_obj.capture_array()
     except:
         cap = cv2.VideoCapture(0)
-        def get_frame(): 
+        def get_frame():
             ret, f = cap.read()
             return f if ret else None
 
     ai = AIProcessor().start()
-    cv2.namedWindow("PillTrack", cv2.WND_PROP_FULLSCREEN)
-    cv2.setWindowProperty("PillTrack", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    
+    # SETUP FIXED WINDOW
+    window_name = "PillTrack"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, CFG.DISPLAY_SIZE[0], CFG.DISPLAY_SIZE[1])
 
     last_ui_time = 0
     while True:
         frame = get_frame()
         if frame is None: continue
 
-        # Send to AI Thread
         with ai.lock:
             ai.latest_frame = frame
 
-        # UI Update (10 FPS)
-        if time.time() - last_ui_time > 0.1:
+        if time.time() - last_ui_time > 0.1: # 10 FPS
             display_f = frame.copy()
             draw_ui(display_f, ai)
-            cv2.imshow("PillTrack", display_f)
+            cv2.imshow(window_name, display_f)
             last_ui_time = time.time()
 
         if cv2.waitKey(1) == ord('q'): break
 
-    cv2.destroyAllWindows()
+    cv2.destroyAllWindows() 
