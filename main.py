@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PILLTRACK – SENIOR EDITION (TARGETED SEARCH & AUTO-COMPLETE)
+PILLTRACK – SENIOR EDITION (FIXED & OPTIMIZED)
+✔ Fixed: Added missing config attributes (SIFT_TOP_K, DINO_TOP_K)
 ✔ Optimization: Searches ONLY for prescribed drugs (Reduced Search Space)
 ✔ Automation: Auto-complete & Reset when prescription is filled
-✔ Profiling: Granular timing logs (YOLO/DINO/SIFT)
 ✔ Pipeline: 100% RGB888
 """
 
@@ -54,10 +54,14 @@ class Config:
     W_SIFT: float = 0.4
     SIFT_SATURATION: int = 400
     
+    # [FIXED] Missing Attributes Restored
+    SIFT_TOP_K: int = 3       # จำนวนตัว SIFT ที่จะเอามาเทียบ
+    DINO_TOP_K: int = 5       # จำนวนตัว DINO ที่จะเอามาเทียบ
+    
     # Performance
     AI_FRAME_SKIP: int = 2
     MIN_DINO_SCORE: float = 0.4
-    VERIFY_THRESHOLD: float = 0.65 # Increased slightly for targeted search
+    VERIFY_THRESHOLD: float = 0.65 
     
     # Normalization (RGB)
     MEAN: np.ndarray = field(default_factory=lambda: np.array([0.485, 0.456, 0.406], dtype=np.float32))
@@ -245,6 +249,7 @@ class AIProcessor:
             sift_list = data.get('sift', []) if isinstance(data, dict) else []
             
             self.full_db_vectors[norm] = dino_list
+            # [FIXED] Now uses CFG.SIFT_TOP_K correctly
             self.full_db_sift[norm] = sift_list[:CFG.SIFT_TOP_K]
             
         print(f"✅ Database loaded: {len(self.full_db_vectors)} drugs available.")
@@ -356,7 +361,7 @@ class AIProcessor:
         with self.lock:
             self.results = temp_results
 
-        # --- LOGGING ( Requirement 3 ) ---
+        # --- LOGGING ---
         print(f"⏱️ [PROF] YOLO: {t_yolo:.1f}ms | Crop: {t_crop:.1f}ms | DINO: {t_dino:.1f}ms | Match: {t_match:.1f}ms")
 
     def start(self):
@@ -448,7 +453,7 @@ def main():
             data = ai.his.fetch_prescription("HN123")
             if data: 
                 ai.rx.update_from_his(data)
-                ai.prepare_search_space() # <--- สร้าง Mini Search Space ทันทีที่ได้ข้อมูล
+                ai.prepare_search_space() 
 
     camera.release()
     cv2.destroyAllWindows()
