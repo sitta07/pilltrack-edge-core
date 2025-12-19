@@ -4,7 +4,7 @@
 
 # --- 📦 Artifacts: ไฟล์สำคัญที่ต้อง Sync ขึ้น S3 ---
 artifacts:
-  model: "models/seg_best_process_openvino_model/"      # YOLOv8 weights สำหรับ Segmentation
+  model: "models/seg_best_process.pt"      # YOLOv8 weights สำหรับ Segmentation
   pack_vec: "database/pill_fingerprints.pkl" # [แก้แล้ว] ชื่อไฟล์ใหม่ที่มีทั้ง DINO และ SIFT ข้างใน
   drug_list: "database/drug_list.json"     # Metadata รายชื่อยา
 
