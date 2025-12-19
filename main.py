@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PILLTRACK – SENIOR EDITION (STRICT RGB PIPELINE)
-✔ Pipeline is 100% RGB (No BGR logic internally)
-✔ Auto-detects Raspberry Pi Camera (Picamera2) vs USB Webcam
-✔ Real-time Cross-check with Hospital Prescription
+PILLTRACK – SENIOR EDITION (PURE RGB888 PIPELINE)
+✔ Camera input is forced to RGB888
+✔ AI Processing (YOLO/DINO/SIFT) works on RGB888
+✔ Display outputs raw RGB888 (Note: Standard OpenCV windows might look blue-ish)
 """
 
 import os
@@ -64,7 +64,7 @@ class Config:
     VERIFY_THRESHOLD: float = 0.6
     UI_UPDATE_FPS: int = 20
     
-    # Normalization (ImageNet is RGB based)
+    # Normalization (RGB based)
     MEAN: np.ndarray = field(default_factory=lambda: np.array([0.485, 0.456, 0.406], dtype=np.float32))
     STD: np.ndarray = field(default_factory=lambda: np.array([0.229, 0.224, 0.225], dtype=np.float32))
 
@@ -74,9 +74,6 @@ FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 # ================= 📷 CAMERA HANDLER (STRICT RGB) =================
 class CameraHandler:
-    """
-    Handles camera initialization ensuring RGB output.
-    """
     def __init__(self, width=1280, height=720):
         self.width = width
         self.height = height
@@ -84,11 +81,10 @@ class CameraHandler:
         self.cap = None
         self.picam = None
         
-        # Try importing Picamera2
         try:
             from picamera2 import Picamera2
             self.picam = Picamera2()
-            # FORCE RGB888 format
+            # FORCE RGB888 format (24-bit RGB)
             config = self.picam.create_preview_configuration(
                 main={"size": (self.width, self.height), "format": "RGB888"}
             )
@@ -105,18 +101,16 @@ class CameraHandler:
             
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-            print("📷 Camera: Using OpenCV VideoCapture (Will convert BGR->RGB)")
+            print("📷 Camera: Using OpenCV VideoCapture (Converted to RGB)")
 
     def get_frame(self):
         if self.use_picamera:
-            # Picamera2 configured as RGB888, returns RGB directly
+            # Returns RGB888 directly
             return self.picam.capture_array()
         else:
             ret, frame = self.cap.read()
-            if not ret:
-                return None
-            # OpenCV returns BGR by default, we convert to RGB IMMEDIATELY
-            # From this point on, everything is RGB.
+            if not ret: return None
+            # Convert BGR to RGB immediately
             return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
     def release(self):
@@ -165,7 +159,7 @@ class PrescriptionManager:
 
 # ================= 🛠️ UTILS =================
 def draw_text(img, text, pos, scale=0.5, color=(255,255,255), thickness=1):
-    # Note: Color input must be RGB tuple e.g. (255, 0, 0) for RED
+    # Color input must be RGB tuple e.g. (255, 0, 0) for RED
     cv2.putText(img, text, pos, FONT, scale, (0,0,0), thickness+2)
     cv2.putText(img, text, pos, FONT, scale, color, thickness)
 
@@ -189,7 +183,7 @@ class FeatureEngine:
         batch = np.zeros((len(crop_list), 3, 224, 224), dtype=np.float32)
         for i, img in enumerate(crop_list):
             img_resized = cv2.resize(img, (224, 224), interpolation=cv2.INTER_LINEAR)
-            # Normalize RGB (Mean/Std are for RGB)
+            # Normalize RGB
             img_norm = (img_resized.astype(np.float32) / 255.0 - CFG.MEAN) / CFG.STD
             batch[i] = img_norm.transpose(2, 0, 1)
         return batch
@@ -324,21 +318,17 @@ class AIProcessor:
 
 # ================= 🖥️ UI & DISPLAY =================
 def draw_ui(frame: np.ndarray, ai_proc: AIProcessor):
-    # Frame is RGB. Colors must be defined as (R, G, B)
+    # Colors defined in RGB
     rx = ai_proc.rx
-    
-    # Colors (RGB)
-    COLOR_CYAN = (0, 255, 255) # RGB
-    COLOR_YELLOW = (255, 255, 0) # RGB
+    COLOR_CYAN = (0, 255, 255)
+    COLOR_YELLOW = (255, 255, 0)
     COLOR_GREEN = (0, 255, 0)
     COLOR_GRAY = (150, 150, 150)
     COLOR_RED = (255, 0, 0)
     
-    # Header
     status_text = f"MODE: {CFG.MODE.upper()} | PATIENT: {rx.patient_name}"
     draw_text(frame, status_text, (20, CFG.DISPLAY_SIZE[1] - 30), 0.6, COLOR_CYAN, 2)
 
-    # Checklist Area
     y_pos = 50
     draw_text(frame, "PRESCRIPTION CHECKLIST:", (CFG.DISPLAY_SIZE[0] - 300, 30), 0.6, COLOR_YELLOW, 2)
     
@@ -347,11 +337,9 @@ def draw_ui(frame: np.ndarray, ai_proc: AIProcessor):
         color = COLOR_GREEN if is_found else COLOR_GRAY
         qty_str = f" x{data['qty']}" if data['qty'] else ""
         text = f"{'✔' if is_found else '□'} {data['original'].upper()}{qty_str}"
-        
         draw_text(frame, text, (CFG.DISPLAY_SIZE[0] - 280, y_pos), 0.5, color, 1)
         y_pos += 30
 
-    # Boxes
     with ai_proc.lock:
         for res in ai_proc.results:
             x1, y1, x2, y2 = res['box']
@@ -366,7 +354,6 @@ def main():
         try: SyncManager().sync()
         except: pass
 
-    # Initialize Camera (Strict RGB)
     try:
         camera = CameraHandler(width=CFG.DISPLAY_SIZE[0], height=CFG.DISPLAY_SIZE[1])
     except RuntimeError as e:
@@ -375,15 +362,14 @@ def main():
 
     ai = AIProcessor().start()
     
-    print(f"🚀 Started in {CFG.MODE} mode (RGB Pipeline).")
+    print(f"🚀 Started in {CFG.MODE} mode (RGB888 Strict).")
     if CFG.MODE == "integrated":
         print("⌨️ Press 'H' to fetch prescription for HN123")
 
     while True:
-        # frame is GUARANTEED to be RGB here
         frame = camera.get_frame()
         if frame is None:
-            print("⚠️ Warning: Empty frame received.")
+            print("⚠️ Warning: Empty frame.")
             time.sleep(0.1)
             continue
         
@@ -393,14 +379,12 @@ def main():
         if ai.rx.is_ready:
             draw_ui(display_frame, ai)
         else:
-            # Color RGB Red = (255, 0, 0)
+            # RGB Red
             draw_text(display_frame, "WAITING FOR PATIENT DATA... (PRESS 'H')", (400, 360), 0.8, (255, 0, 0), 2)
 
-        # ⚠️ CRITICAL DISPLAY NOTE:
-        # We processed everything in RGB. But cv2.imshow EXPECTS BGR.
-        # If we pass RGB to it, Red becomes Blue. 
-        # To respect "No BGR logic" in our code, we swap ONLY for the window display.
-        cv2.imshow("PillTrack HIS (RGB)", cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR))
+        # ⚠️ Displaying Raw RGB: Colors on screen will be swapped (Blue <-> Red)
+        # This is expected behavior for a strict RGB pipeline shown on BGR window.
+        cv2.imshow("PillTrack HIS (RAW RGB)", display_frame)
         
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'): break
