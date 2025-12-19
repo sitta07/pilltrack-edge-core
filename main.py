@@ -295,7 +295,8 @@ if __name__ == "__main__":
             return f if ret else None
 
     ai = AIProcessor().start()
-    cv2.namedWindow("PillTrack", cv2.WINDOW_NORMAL)
+    cv2.namedWindow("PillTrack", cv2.WND_PROP_FULLSCREEN)
+    cv2.setWindowProperty("PillTrack", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
     last_ui_time = 0
     while True:
