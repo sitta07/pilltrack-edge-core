@@ -25,7 +25,7 @@ except FileNotFoundError:
 @dataclass
 class Config:
     # ⚠️ อย่าลืมแก้ Path Model ให้เป็นตัวที่เทรน Seg มานะ (เช่น best-seg.pt)
-    MODEL_PATH: str = yaml_cfg.get('artifacts', {}).get('model', 'yolov8n-seg.pt') 
+    MODEL_PATH: str = yaml_cfg.get('artifacts', {}).get('model', 'yolov12-seg(last).pt') 
     
     DISPLAY_WIDTH: int = yaml_cfg.get('display', {}).get('width', 1280)
     DISPLAY_HEIGHT: int = yaml_cfg.get('display', {}).get('height', 720)
