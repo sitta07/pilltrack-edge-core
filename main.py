@@ -59,7 +59,7 @@ class Config:
     
     # Performance
     AI_FRAME_SKIP: int = 1
-    MIN_DINO_SCORE: float = 0.7
+    MIN_DINO_SCORE: float = 0.6
     VERIFY_THRESHOLD: float = 0.6 # [FIX] ขยับขึ้นนิดนึงเพราะ W_DINO เต็ม 1.0 แล้ว
     
     # Normalization (RGB based)
