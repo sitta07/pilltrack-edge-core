@@ -455,61 +455,112 @@ def draw_ui(frame: np.ndarray, ai_proc: AIProcessor):
                 draw_text(frame, label_text, (x1, y1-5), 0.4, color, 1)
 
 # ================= 🚀 MAIN =================
+# ================= 🚀 MAIN =================
 def main():
+    # 1. Sync Time (Optional)
     if SyncManager:
         try: SyncManager().sync()
         except: pass
 
-    try: camera = CameraHandler(width=CFG.DISPLAY_SIZE[0], height=CFG.DISPLAY_SIZE[1])
-    except: return
+    # 2. Init Camera
+    try: 
+        camera = CameraHandler(width=CFG.DISPLAY_SIZE[0], height=CFG.DISPLAY_SIZE[1])
+    except Exception as e:
+        print(f"❌ Camera Error: {e}")
+        return
 
+    # 3. Start AI
     ai = AIProcessor().start()
     
-    hn_queue = deque(["HN123", "HN456"]) 
+    # ------------------ 🔥 DYNAMIC QUEUE LOADER 🔥 ------------------
+    # กำหนด Path ของไฟล์ Mock Data
+    MOCK_DB_PATH = "mock_server/prescriptions.json" 
+    hn_queue = deque()
+
+    if os.path.exists(MOCK_DB_PATH):
+        try:
+            with open(MOCK_DB_PATH, 'r', encoding='utf-8') as f:
+                mock_data = json.load(f)
+            
+            # ดึงเฉพาะ HN (Keys) มาสร้างเป็นคิว
+            # เช่น ['HN123', 'HN456', 'HN789']
+            hn_list = list(mock_data.keys())
+            hn_queue = deque(hn_list)
+            
+            print(f"📂 Loaded {len(hn_list)} Patients from JSON: {hn_list}")
+            
+        except Exception as e:
+            print(f"❌ JSON Error: {e} -> Fallback to dummy HN")
+            hn_queue = deque(["HN123"])
+    else:
+        print(f"⚠️ File not found: {MOCK_DB_PATH} -> Using Hardcoded Fallback")
+        hn_queue = deque(["HN123", "HN456"])
+    # ---------------------------------------------------------------
+
     current_hn = None
     
-    print(f"🚀 Started in {CFG.MODE} mode (Global Search + Profiling).")
-    if CFG.MODE == "integrated":
-        print("⌨️  Controls: [N] Next Patient | [Q] Quit")
+    print(f"🚀 Started in {CFG.MODE} mode")
+    print("⌨️  Controls: [N] Next Patient | [Q] Quit")
 
+    # 4. Main Loop
     while True:
         frame = camera.get_frame()
         if frame is None:
             time.sleep(0.1)
             continue
         
+        # ส่งเฟรมให้ AI (Thread แยกจะจัดการเอง)
         ai.latest_frame = frame
         display_frame = frame.copy()
         
+        # --- UI LOGIC ---
         if ai.rx.is_ready:
+            # ถ้ามีข้อมูลยา -> วาด UI ปกติ
             draw_ui(display_frame, ai)
             
+            # ถ้าจ่ายยาครบแล้ว -> รอ 3 วิ แล้ว Reset อัตโนมัติ (หรือจะรอปุ่ม N ก็ได้แล้วแต่ดีไซน์)
             if ai.rx.is_completed:
                 if time.time() - ai.rx.complete_timestamp > 3.0:
-                    print("🔄 Auto-resetting for next patient...")
-                    ai.rx.reset()
+                    print("🔄 Completed! Auto-resetting state (Wait for Next Patient)...")
+                    ai.rx.reset() # เคลียร์หน้าจอ รอคนกด N คนต่อไป
         else:
-            draw_text(display_frame, "PRESS 'N' FOR NEXT PATIENT", (380, 360), 0.8, (255, 0, 0, 255), 2)
+            # ถ้ายังไม่มีข้อมูลยา (ว่างเปล่า)
+            status_text = f"NEXT: {hn_queue[0]}" if hn_queue else "NO DATA"
+            draw_text(display_frame, f"PRESS 'N' FOR {status_text}", (380, 360), 0.8, (0, 255, 255, 255), 2)
 
         cv2.imshow("PillTrack HIS (Global Search)", display_frame)
         
+        # --- CONTROL LOGIC ---
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'): 
             break
-        elif key == ord('n') and CFG.MODE == "integrated":
+        elif key == ord('n'):
+            if not hn_queue:
+                print("⚠️ No more patients in queue!")
+                continue
+
+            # Rotate Queue (เอาคนแรกไปต่อท้าย หรือดึงออกมาเลยก็ได้)
+            # ถ้าใช้ .rotate(-1) คือวนลูปไม่รู้จบ (HN123 -> HN456 -> HN123)
             hn_queue.rotate(-1)
-            current_hn = hn_queue[0]
-            print(f"⏩ Switching to Next Patient: {current_hn}")
+            current_hn = hn_queue[0] 
             
+            print(f"\n⏩ Switching to Patient: {current_hn}")
+            
+            # Reset สถานะเก่าก่อน
             ai.rx.reset()
+            
+            # เรียกข้อมูลจาก HISConnector (ซึ่งควรอ่านจากไฟล์เดียวกัน หรือ API)
             data = ai.his.fetch_prescription(current_hn)
+            
             if data: 
                 ai.rx.update_from_his(data)
             else:
-                print(f"❌ Failed to fetch data for {current_hn}")
+                print(f"❌ Failed to fetch data for {current_hn} (Check HN in JSON)")
 
+    # Cleanup
     camera.release()
     cv2.destroyAllWindows()
+    print("👋 Exiting PillTrack...")
 
 if __name__ == "__main__":
     main()
