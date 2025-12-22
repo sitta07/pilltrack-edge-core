@@ -54,7 +54,7 @@ class Config:
     W_DINO: float = 0.6
     W_SIFT: float = 0.4
     
-    SIFT_SATURATION: int = 350
+    SIFT_SATURATION: int = 100
     SIFT_TOP_K: int = 3
     
     # Performance
