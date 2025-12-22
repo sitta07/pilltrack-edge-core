@@ -52,7 +52,7 @@ class Config:
     # Scoring
     W_DINO: float = 0.4
     W_SIFT: float = 0.6
-    SIFT_SATURATION: int = 400
+    SIFT_SATURATION: int = 200
     
     SIFT_TOP_K: int = 3
     
