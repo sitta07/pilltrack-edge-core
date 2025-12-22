@@ -51,15 +51,15 @@ class Config:
     MODE: str = yaml_cfg.get('operation', {}).get('mode', 'standalone')
     
     # [FIX] Scoring: Pure DINOv2 (ไม่เอา SIFT มาถ่วง)
-    W_DINO: float = 0.6
-    W_SIFT: float = 0.4
+    W_DINO: float = 1
+    W_SIFT: float = 0
     
     SIFT_SATURATION: int = 100
     SIFT_TOP_K: int = 3
     
     # Performance
     AI_FRAME_SKIP: int = 1
-    MIN_DINO_SCORE: float = 0.6
+    MIN_DINO_SCORE: float = 0.7
     VERIFY_THRESHOLD: float = 0.6 # [FIX] ขยับขึ้นนิดนึงเพราะ W_DINO เต็ม 1.0 แล้ว
     
     # Normalization (RGB based)
