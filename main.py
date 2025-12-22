@@ -45,22 +45,22 @@ class Config:
         yaml_cfg['display']['width'],
         yaml_cfg['display']['height']
     )
-    AI_SIZE: int = 416
+    AI_SIZE: int = 224 # [FIX] ใช้ 224 ให้ตรงกับที่เทรน/config ใหม่
     CONF_THRESHOLD: float = yaml_cfg['settings']['yolo_conf']
     
     MODE: str = yaml_cfg.get('operation', {}).get('mode', 'standalone')
     
-    # Scoring
-    W_DINO: float = 0.85
-    W_SIFT: float = 0.15
-    SIFT_SATURATION: int = 350
+    # [FIX] Scoring: Pure DINOv2 (ไม่เอา SIFT มาถ่วง)
+    W_DINO: float = 1.0
+    W_SIFT: float = 0.0
     
+    SIFT_SATURATION: int = 350
     SIFT_TOP_K: int = 3
     
     # Performance
     AI_FRAME_SKIP: int = 1
     MIN_DINO_SCORE: float = 0.6
-    VERIFY_THRESHOLD: float = 0.54
+    VERIFY_THRESHOLD: float = 0.65 # [FIX] ขยับขึ้นนิดนึงเพราะ W_DINO เต็ม 1.0 แล้ว
     
     # Normalization (RGB based)
     MEAN: np.ndarray = field(default_factory=lambda: np.array([0.485, 0.456, 0.406], dtype=np.float32))
@@ -69,6 +69,28 @@ class Config:
 CFG = Config()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 FONT = cv2.FONT_HERSHEY_SIMPLEX
+
+# ================= 🛠️ UTILS (FIXED) =================
+def normalize_name(name: str) -> str:
+    """
+    [FIXED] รองรับ Naming Convention ใหม่ (_box, _blister, _rot)
+    Example: 'paracetamol_box_rot90' -> 'paracetamol'
+    """
+    name = name.lower()
+    # ตัด suffix ของระบบใหม่
+    name = re.sub(r'_box.*', '', name)
+    name = re.sub(r'_blister.*', '', name)
+    name = re.sub(r'_pack.*', '', name) # เผื่อมีของเก่าหลงเหลือ
+    # ตัด suffix rotation
+    name = re.sub(r'_rot.*', '', name)
+    # ตัดอักขระพิเศษ
+    name = re.sub(r'[^a-z0-9]', '', name)
+    return name
+
+def draw_text(img, text, pos, scale=0.5, color=(255,255,255,255), thickness=1):
+    black = (0, 0, 0, 255)
+    cv2.putText(img, text, pos, FONT, scale, black, thickness+2)
+    cv2.putText(img, text, pos, FONT, scale, color, thickness)
 
 # ================= 📷 CAMERA HANDLER =================
 class CameraHandler:
@@ -90,7 +112,7 @@ class CameraHandler:
             self.use_picamera = True
             print("📷 Camera: Using Picamera2 (XRGB8888)")
         except Exception as e:
-            print(f"⚠️ Picamera2 failed. Falling back to OpenCV. {e}")
+            print(f"⚠️ Picamera2 failed/not found. Falling back to OpenCV. {e}")
             self.use_picamera = False
             self.cap = cv2.VideoCapture(0)
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
@@ -102,6 +124,7 @@ class CameraHandler:
         else:
             ret, frame = self.cap.read()
             if not ret: return None
+            # OpenCV อ่านเป็น BGR ต้องแปลงเป็น RGBA ให้เหมือน Picamera
             return cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
 
     def release(self):
@@ -146,6 +169,10 @@ class PrescriptionManager:
     def verify(self, detected_name: str):
         if self.is_completed: return False
         norm_det = normalize_name(detected_name)
+        
+        # [DEBUG] เช็คว่าชื่อตรงกันไหม
+        # print(f"Comparing: Detected '{norm_det}' vs Targets {list(self.target_drugs.keys())}")
+        
         if norm_det in self.target_drugs:
             self.target_drugs[norm_det]['found'] = 1
             self.check_complete()
@@ -166,18 +193,6 @@ class PrescriptionManager:
         self.is_completed = False
         self.complete_timestamp = 0
 
-# ================= 🛠️ UTILS =================
-def normalize_name(name: str) -> str:
-    name = name.lower()
-    name = re.sub(r'_pack.*', '', name)
-    name = re.sub(r'[^a-z0-9]', '', name)
-    return name
-
-def draw_text(img, text, pos, scale=0.5, color=(255,255,255,255), thickness=1):
-    black = (0, 0, 0, 255)
-    cv2.putText(img, text, pos, FONT, scale, black, thickness+2)
-    cv2.putText(img, text, pos, FONT, scale, color, thickness)
-
 class FeatureEngine:
     def __init__(self):
         print("⏳ Loading DINOv2 (ONNX Runtime)...")
@@ -187,7 +202,7 @@ class FeatureEngine:
             print(f"❌ Error loading ONNX: {e}")
             raise e
             
-        self.sift = cv2.SIFT_create(nfeatures=500)
+        # self.sift = cv2.SIFT_create(nfeatures=500) # [FIX] ปิด SIFT เพื่อประหยัด RAM
         self.input_name = self.sess.get_inputs()[0].name
         
     def preprocess_batch(self, crop_list: List[np.ndarray]) -> np.ndarray:
@@ -208,10 +223,7 @@ class FeatureEngine:
         embeddings = embeddings / (norms + 1e-6)
         return embeddings
 
-    def extract_sift(self, img: np.ndarray) -> Optional[np.ndarray]:
-        gray = cv2.cvtColor(img, cv2.COLOR_RGBA2GRAY)
-        _, descriptors = self.sift.detectAndCompute(gray, None)
-        return descriptors
+    # [FIX] ลบ SIFT extraction function ออกหรือไม่เรียกใช้
 
 # ================= 🤖 AI PROCESSOR =================
 class AIProcessor:
@@ -221,7 +233,7 @@ class AIProcessor:
         self.his = HISConnector()
         
         self.full_db_vectors = {} 
-        self.full_db_sift = {}
+        # self.full_db_sift = {} # [FIX] ไม่ใช้ SIFT DB
         
         self.active_vectors = None
         self.active_names = []
@@ -248,7 +260,7 @@ class AIProcessor:
         """เริ่มจับเวลาเมื่อกด T"""
         self.timer_running = True
         self.timer_start_time = time.time()
-        self.timer_result_text = "" # Clear old result
+        self.timer_result_text = ""
         print("⏱️ Timer Started! Waiting for detection...")
 
     def load_db(self):
@@ -259,9 +271,11 @@ class AIProcessor:
         for name, data in raw.items():
             norm = normalize_name(name)
             dino_list = data.get('dino', []) if isinstance(data, dict) else data
-            sift_list = data.get('sift', []) if isinstance(data, dict) else []
-            self.full_db_vectors[norm] = dino_list
-            self.full_db_sift[norm] = sift_list[:CFG.SIFT_TOP_K]
+            # sift_list = ... [FIX] ไม่โหลด SIFT
+            
+            # [FIX] ตรวจสอบว่ามี Vector ไหม
+            if dino_list is not None and len(dino_list) > 0:
+                self.full_db_vectors[norm] = dino_list
             
         print(f"✅ Database loaded: {len(self.full_db_vectors)} drugs available.")
 
@@ -279,16 +293,6 @@ class AIProcessor:
         else:
             self.active_vectors = None
 
-    def get_sift_score(self, query_des, target_des_list) -> float:
-        if query_des is None or not target_des_list: return 0.0
-        max_score = 0.0
-        for target_des in target_des_list:
-            if target_des is None or len(target_des) < 2: continue
-            matches = self.bf.knnMatch(query_des, target_des, k=2)
-            good = [m for m, n in matches if m.distance < 0.75 * n.distance]
-            max_score = max(max_score, min(len(good) / CFG.SIFT_SATURATION, 1.0))
-        return max_score
-
     def process(self, frame: np.ndarray):
         if not self.rx.is_ready or self.rx.is_completed: return
         if self.active_vectors is None: return
@@ -296,18 +300,15 @@ class AIProcessor:
         t_start_total = time.perf_counter()
 
         # 1. YOLO
-        t_yolo_start = time.perf_counter()
         img_rgb = frame[:, :, :3]
         img_resized = cv2.resize(img_rgb, (CFG.AI_SIZE, CFG.AI_SIZE))
         res = self.yolo(img_resized, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
-        t_yolo = (time.perf_counter() - t_yolo_start) * 1000
 
         if res.boxes is None or len(res.boxes) == 0:
             with self.lock: self.results = []
             return
 
         # 2. Crop
-        t_crop_start = time.perf_counter()
         sx, sy = CFG.DISPLAY_SIZE[0] / CFG.AI_SIZE, CFG.DISPLAY_SIZE[1] / CFG.AI_SIZE
         crops, box_coords = [], []
         for box in res.boxes:
@@ -317,21 +318,14 @@ class AIProcessor:
             if crop.size > 0: 
                 crops.append(crop)
                 box_coords.append([dx1, dy1, dx2, dy2])
-        t_crop = (time.perf_counter() - t_crop_start) * 1000
 
         temp_results = []
-        t_dino = 0
-        t_search = 0
-        t_sift_accum = 0 
 
         if crops:
             # 3. DINOv2
-            t_dino_start = time.perf_counter()
             batch_dino = self.engine.extract_dino_batch(crops) 
-            t_dino = (time.perf_counter() - t_dino_start) * 1000
             
             # 4. Search
-            t_search_start = time.perf_counter()
             sim_matrix = np.dot(batch_dino, self.active_vectors)
             
             for i, crop in enumerate(crops):
@@ -339,32 +333,27 @@ class AIProcessor:
                 dino_score = sim_matrix[i][best_idx]
                 matched_name = self.active_names[best_idx]
 
-                # SIFT
-                t_sift_start = time.perf_counter()
-                q_des = self.engine.extract_sift(crop)
-                sift_score = self.get_sift_score(q_des, self.full_db_sift.get(matched_name, []))
-                t_sift_accum += (time.perf_counter() - t_sift_start) * 1000
-                
-                fusion = (dino_score * CFG.W_DINO) + (sift_score * CFG.W_SIFT)
+                # [FIX] Pure DINOv2 Logic (No SIFT)
+                fusion = dino_score # เพราะ W_DINO = 1.0, W_SIFT = 0.0
                 
                 display_name = "Unknown"
                 is_correct_drug = False
                 
                 if fusion > CFG.VERIFY_THRESHOLD:
-                    is_correct_drug = matched_name in self.rx.target_drugs
+                    is_correct_drug = self.rx.verify(matched_name) # ส่งชื่อไป verify เลย
                     
                     if is_correct_drug:
-                        display_name = self.rx.target_drugs[matched_name]['original']
-                        self.rx.verify(matched_name)
+                        display_name = self.rx.target_drugs[normalize_name(matched_name)]['original']
                         
                         # --- ⏱️ STOP TIMER LOGIC ---
                         if self.timer_running:
                             elapsed = time.time() - self.timer_start_time
                             self.timer_result_text = f"{display_name} : {elapsed:.2f} sec"
-                            self.timer_running = False # Stop Timer
+                            self.timer_running = False 
                             print(f"🏁 STOPWATCH: {self.timer_result_text}")
                         # ---------------------------
                     else:
+                        # เจอยาใน Database แต่ไม่ใช่ยาในใบสั่งแพทย์
                         display_name = matched_name.upper()
                 else:
                     display_name = f"? ({fusion:.2f})"
@@ -377,12 +366,11 @@ class AIProcessor:
                     'is_correct': is_correct_drug
                 })
             
-            t_search = (time.perf_counter() - t_search_start) * 1000
 
         with self.lock:
             self.results = temp_results
 
-        t_total = (time.perf_counter() - t_start_total) * 1000
+        # t_total = (time.perf_counter() - t_start_total) * 1000
         # print(f"⏱️ TOTAL: {t_total:.1f}ms") 
 
     def start(self):
@@ -440,16 +428,12 @@ def draw_ui(frame: np.ndarray, ai_proc: AIProcessor):
     timer_pos = (CFG.DISPLAY_SIZE[0] - 350, CFG.DISPLAY_SIZE[1] - 30)
     
     if ai_proc.timer_running:
-        # กำลังจับเวลา: โชว์เวลาวิ่ง
         elapsed = time.time() - ai_proc.timer_start_time
         draw_text(frame, f"⏱️ TIME: {elapsed:.2f} s", timer_pos, 0.8, COLOR_YELLOW, 2)
     elif ai_proc.timer_result_text:
-        # จบแล้ว: โชว์ผลลัพธ์ค้างไว้
         draw_text(frame, f"🏁 {ai_proc.timer_result_text}", timer_pos, 0.7, COLOR_GREEN, 2)
     else:
-        # Standby
         draw_text(frame, "[Press T to Start Timer]", timer_pos, 0.5, COLOR_GRAY, 1)
-    # -----------------------------------
 
 # ================= 🚀 MAIN =================
 def main():
@@ -500,7 +484,7 @@ def main():
                 if time.time() - ai.rx.complete_timestamp > 3.0:
                     print("🔄 Completed! Auto-resetting...")
                     ai.rx.reset() 
-                    # Reset Timer text too if needed, or keep it until N pressed
+                    ai.timer_result_text = "" # Reset timer text
         else:
             status_text = f"NEXT: {hn_queue[0]}" if hn_queue else "NO DATA"
             draw_text(display_frame, f"PRESS 'N' FOR {status_text}", (380, 360), 0.8, (0, 255, 255, 255), 2)
@@ -510,7 +494,7 @@ def main():
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'): 
             break
-        elif key == ord('t'): # <--- ปุ่ม T เพิ่มตรงนี้
+        elif key == ord('t'):
             ai.start_timer()
         elif key == ord('n'):
             if not hn_queue: continue
@@ -518,7 +502,6 @@ def main():
             current_hn = hn_queue[0] 
             print(f"\n⏩ Switching to Patient: {current_hn}")
             ai.rx.reset()
-            # Clear timer result when switching patient
             ai.timer_result_text = ""
             
             data = ai.his.fetch_prescription(current_hn)

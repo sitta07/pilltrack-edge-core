@@ -23,7 +23,7 @@ except FileNotFoundError:
 @dataclass
 class Config:
     # ⚠️ Check model path (must be a segmentation model e.g., yolov8n-seg.pt)
-    MODEL_PATH: str = yaml_cfg.get('artifacts', {}).get('model', 'yolov12-seg(last).pt') 
+    MODEL_PATH: str = yaml_cfg.get('artifacts', {}).get('model', 'yolov12-seg().pt') 
     
     DISPLAY_WIDTH: int = yaml_cfg.get('display', {}).get('width', 1280)
     DISPLAY_HEIGHT: int = yaml_cfg.get('display', {}).get('height', 720)
