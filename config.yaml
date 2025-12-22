@@ -16,7 +16,7 @@ his_api:
 
 # --- 📦 Artifacts: ไฟล์สำคัญที่ต้อง Sync ขึ้น S3 ---
 artifacts:
-  model: "models/yolov12-seg(last).pt"   #seg_best_process   
+  model: "models/seg_best_process.pt"   #seg_best_process   
   pack_vec: "database/pill_fingerprints.pkl" 
   drug_list: "database/drug_list.json"     
 
