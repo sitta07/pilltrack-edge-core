@@ -28,7 +28,7 @@ paths:
 
 # --- ⚙️ Settings: จูนค่า AI (คงไว้ตามเดิมของคุณ) ---
 settings:
-  dino_size: 448                           
+  dino_size: 336                           
   yolo_conf: 0.6                          
   w_dino: 0.70                             
   w_sift: 0.30                             

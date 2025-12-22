@@ -14,7 +14,7 @@ class DinoWrapper(nn.Module):
 
 print("⏳ Downloading DINOv2...")
 # โหลดโมเดลตัวเดิม
-raw_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
+raw_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
 raw_model.eval()
 
 # 2. เอา Wrapper มาครอบ
