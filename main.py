@@ -51,8 +51,8 @@ class Config:
     MODE: str = yaml_cfg.get('operation', {}).get('mode', 'standalone')
     
     # [FIX] Scoring: Pure DINOv2 (ไม่เอา SIFT มาถ่วง)
-    W_DINO: float = 1.0
-    W_SIFT: float = 0.0
+    W_DINO: float = 0.85
+    W_SIFT: float = 0.15
     
     SIFT_SATURATION: int = 350
     SIFT_TOP_K: int = 3
