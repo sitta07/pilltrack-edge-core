@@ -57,8 +57,8 @@ class Config:
     SIFT_TOP_K: int = 3
     
     # Performance
-    AI_FRAME_SKIP: int = 4
-    MIN_DINO_SCORE: float = 0.45
+    AI_FRAME_SKIP: int = 2
+    MIN_DINO_SCORE: float = 0.35
     VERIFY_THRESHOLD: float = 0.65 
     
     # Normalization (RGB based)
