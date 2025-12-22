@@ -50,9 +50,9 @@ class Config:
     MODE: str = yaml_cfg.get('operation', {}).get('mode', 'standalone')
     
     # Scoring
-    W_DINO: float = 0.1
-    W_SIFT: float = 0.9
-    SIFT_SATURATION: int = 100
+    W_DINO: float = 0.8
+    W_SIFT: float = 0.2
+    SIFT_SATURATION: int = 400
     
     SIFT_TOP_K: int = 3
     
