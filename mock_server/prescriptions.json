@@ -36,33 +36,5 @@
       {"drug_id": "D008", "name": "bufenac", "amount": 2},
       {"drug_id": "D009", "name": "hydriquin", "amount": 1}
     ]
-  },
-  "HN007": {
-    "patient_name": "Thanasak Meechai",
-    "prescription": [
-      {"drug_id": "D010", "name": "maleate", "amount": 1},
-      {"drug_id": "D011", "name": "mypara", "amount": 2}
-    ]
-  },
-  "HN008": {
-    "patient_name": "Nattaporn Boonmee",
-    "prescription": [
-      {"drug_id": "D012", "name": "noxa", "amount": 1},
-      {"drug_id": "D013", "name": "orata", "amount": 1}
-    ]
-  },
-  "HN009": {
-    "patient_name": "Phichaya Saelim",
-    "prescription": [
-      {"drug_id": "D014", "name": "sara", "amount": 1},
-      {"drug_id": "D015", "name": "turmeric", "amount": 2}
-    ]
-  },
-  "HN010": {
-    "patient_name": "Chaiwat Rattanakorn",
-    "prescription": [
-      {"drug_id": "D016", "name": "uroflow", "amount": 1},
-      {"drug_id": "D017", "name": "yanhee", "amount": 1}
-    ]
   }
 }
