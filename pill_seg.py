@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-PILLTRACK – PURE RGB SEGMENTATION 🌈
-✔ Fix 4-channel error (BGRA -> RGB)
-✔ Pipeline operates in RGB for AI compatibility
+PILLTRACK – PURE RGB SEGMENTATION (FIXED PLOT) 🌈
+✔ Fix 'unexpected argument alpha' error by removing it.
+✔ Keeps entire pipeline in RGB.
 """
 
 import time
@@ -45,7 +45,6 @@ class CameraHandler:
         try:
             from picamera2 import Picamera2
             self.picam = Picamera2()
-            # Picamera returns 4 channels (XRGB/BGRA) usually
             config = self.picam.create_preview_configuration(
                 main={"size": (self.width, self.height), "format": "XRGB8888"}
             )
@@ -64,19 +63,15 @@ class CameraHandler:
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
 
     def get_rgb_frame(self):
-        """
-        Returns a clean 3-Channel RGB Frame.
-        Solves the 'expected 3 channels, got 4' error.
-        """
+        """Returns a clean 3-Channel RGB Frame."""
         if self.use_picamera:
-            # Raw is 4 channels (BGRA/XRGB)
             raw = self.picam.capture_array()
-            # Convert 4 channels -> 3 channels RGB
+            # BGRA -> RGB
             return cv2.cvtColor(raw, cv2.COLOR_BGRA2RGB)
         else:
             ret, frame = self.cap.read()
             if not ret: return None
-            # OpenCV Raw is BGR -> Convert to RGB
+            # BGR -> RGB
             return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
     def release(self):
@@ -93,8 +88,7 @@ class Segmentor:
         self.prev_time = time.time()
 
     def process(self, rgb_frame):
-        # 1. Inference on RGB Image (3 Channels)
-        # retina_masks=True for high-quality masks
+        # 1. Inference on RGB Image
         results = self.model(rgb_frame, 
                              conf=CFG.CONF_THRESHOLD, 
                              imgsz=CFG.AI_SIZE, 
@@ -102,8 +96,9 @@ class Segmentor:
                              verbose=False)
         res = results[0]
 
-        # 2. Draw Segmentation Overlay directly on the RGB image
-        annotated_rgb = res.plot(img=rgb_frame.copy(), alpha=0.4) 
+        # 2. Draw Segmentation Overlay (RGB)
+        # ⚠️ FIXED: Removed 'alpha=0.4' for compatibility with older ultralytics versions
+        annotated_rgb = res.plot(img=rgb_frame.copy()) 
 
         # 3. FPS Calculation
         self.frame_count += 1
@@ -112,18 +107,16 @@ class Segmentor:
             self.frame_count = 0
             self.prev_time = time.time()
 
-        # Draw FPS on RGB image
+        # Draw FPS (Green = RGB correct)
         cv2.putText(annotated_rgb, f"FPS: {self.fps}", (20, 50), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2) # Green text
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
         return annotated_rgb
 
 # ================= 🚀 MAIN LOOP =================
 def main():
     try: 
-        # Initialize Camera
         camera = CameraHandler(width=CFG.DISPLAY_WIDTH, height=CFG.DISPLAY_HEIGHT)
-        # Initialize AI
         ai = Segmentor()
     except Exception as e:
         print(f"❌ Initialization Error: {e}")
@@ -133,19 +126,16 @@ def main():
     print("⌨️  Press [Q] to Quit")
 
     while True:
-        # 1. Get Clean RGB Frame (3 Channels)
+        # 1. Get RGB Frame
         rgb_frame = camera.get_rgb_frame()
-        
         if rgb_frame is None:
             time.sleep(0.01)
             continue
         
-        # 2. Process with AI (RGB in -> RGB out)
+        # 2. Process (RGB -> RGB)
         final_rgb = ai.process(rgb_frame)
         
-        # 3. Display
-        # Note: cv2.imshow expects BGR format to display colors correctly on screen.
-        # We convert RGB -> BGR only for this specific line.
+        # 3. Display (Convert to BGR only for imshow correct colors)
         display_bgr = cv2.cvtColor(final_rgb, cv2.COLOR_RGB2BGR)
         cv2.imshow("PillTrack Segment", display_bgr)
         
