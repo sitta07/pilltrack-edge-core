@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-PILLTRACK – GLOBAL SEARCH + PERFORMANCE LOGGER
+PILLTRACK – GLOBAL SEARCH + PERFORMANCE LOGGER + TIMER CHALLENGE ⏱️
 ✔ Pipeline: RGB8888 (RGBA 32-bit)
 ✔ Global Search: Scans against entire 3,000+ drug database
 ✔ Profiler: Logs ms for YOLO, DINO, SIFT, and Search individually
+✔ Timer Mode: Press 'T' to start stopwatch, Stops on verified detection
 """
 
 import os
@@ -58,8 +59,8 @@ class Config:
     
     # Performance
     AI_FRAME_SKIP: int = 1
-    MIN_DINO_SCORE: float = 0.55
-    VERIFY_THRESHOLD: float = 0.55
+    MIN_DINO_SCORE: float = 0.6
+    VERIFY_THRESHOLD: float = 0.54
     
     # Normalization (RGB based)
     MEAN: np.ndarray = field(default_factory=lambda: np.array([0.485, 0.456, 0.406], dtype=np.float32))
@@ -180,13 +181,10 @@ def draw_text(img, text, pos, scale=0.5, color=(255,255,255,255), thickness=1):
 class FeatureEngine:
     def __init__(self):
         print("⏳ Loading DINOv2 (ONNX Runtime)...")
-        # ใช้ ONNX แทน PyTorch!
-        # providers=['CPUExecutionProvider'] คือรันบน CPU แต่เร็วกว่ามาก
         try:
             self.sess = ort.InferenceSession("dinov2_vits14.onnx", providers=['CPUExecutionProvider'])
         except Exception as e:
             print(f"❌ Error loading ONNX: {e}")
-            print("💡 Did you run 'export_dino.py' yet?")
             raise e
             
         self.sift = cv2.SIFT_create(nfeatures=500)
@@ -203,19 +201,11 @@ class FeatureEngine:
 
     def extract_dino_batch(self, crop_list: List[np.ndarray]) -> np.ndarray:
         if not crop_list: return np.array([])
-        
-        # Preprocess
         img_batch_np = self.preprocess_batch(crop_list)
-        
-        # Run ONNX Inference
-        # ไม่ต้องใช้ torch.no_grad() หรือ .to(device) เพราะ ONNX จัดการเอง
         outputs = self.sess.run(None, {self.input_name: img_batch_np})
-        
-        # Normalize (ทำด้วย Numpy เพราะ ONNX คืนค่าเป็น Numpy)
         embeddings = outputs[0]
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        embeddings = embeddings / (norms + 1e-6) # ป้องกันหาร 0
-        
+        embeddings = embeddings / (norms + 1e-6)
         return embeddings
 
     def extract_sift(self, img: np.ndarray) -> Optional[np.ndarray]:
@@ -233,7 +223,6 @@ class AIProcessor:
         self.full_db_vectors = {} 
         self.full_db_sift = {}
         
-        # GLOBAL SEARCH Active Vectors
         self.active_vectors = None
         self.active_names = []
         
@@ -248,6 +237,19 @@ class AIProcessor:
         self.results = []
         self.lock = threading.Lock()
         self.process_counter = 0
+
+        # --- ⏱️ TIMER VARIABLES ---
+        self.timer_running = False
+        self.timer_start_time = 0
+        self.timer_result_text = ""
+        # --------------------------
+
+    def start_timer(self):
+        """เริ่มจับเวลาเมื่อกด T"""
+        self.timer_running = True
+        self.timer_start_time = time.time()
+        self.timer_result_text = "" # Clear old result
+        print("⏱️ Timer Started! Waiting for detection...")
 
     def load_db(self):
         if not os.path.exists(CFG.DB_PACKS_VEC): return
@@ -288,34 +290,29 @@ class AIProcessor:
         return max_score
 
     def process(self, frame: np.ndarray):
-        # ถ้าไม่มีใบยา หรือทำงานเสร็จแล้ว หรือยังไม่โหลด Database -> ไม่ต้องทำ
         if not self.rx.is_ready or self.rx.is_completed: return
         if self.active_vectors is None: return
 
-        # --- TIMER START ---
         t_start_total = time.perf_counter()
 
-        # 1. YOLO Detection
+        # 1. YOLO
         t_yolo_start = time.perf_counter()
         img_rgb = frame[:, :, :3]
         img_resized = cv2.resize(img_rgb, (CFG.AI_SIZE, CFG.AI_SIZE))
         res = self.yolo(img_resized, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
         t_yolo = (time.perf_counter() - t_yolo_start) * 1000
 
-        # ถ้าไม่เจอยาเลย
         if res.boxes is None or len(res.boxes) == 0:
             with self.lock: self.results = []
-            # print(f"⏱️ [IDLE] YOLO: {t_yolo:.1f}ms | No pills detected.") # ปิด Log รกๆ ได้ถ้าต้องการ
             return
 
-        # 2. Cropping
+        # 2. Crop
         t_crop_start = time.perf_counter()
         sx, sy = CFG.DISPLAY_SIZE[0] / CFG.AI_SIZE, CFG.DISPLAY_SIZE[1] / CFG.AI_SIZE
         crops, box_coords = [], []
         for box in res.boxes:
             x1, y1, x2, y2 = box.xyxy[0].int().tolist()
             dx1, dy1, dx2, dy2 = int(x1*sx), int(y1*sy), int(x2*sx), int(y2*sy)
-            # กันเหนียว: ตัดขอบไม่ให้เกินขนาดภาพ
             crop = frame[max(0, dy1):min(frame.shape[0], dy2), max(0, dx1):min(frame.shape[1], dx2)]
             if crop.size > 0: 
                 crops.append(crop)
@@ -328,62 +325,51 @@ class AIProcessor:
         t_sift_accum = 0 
 
         if crops:
-            # 3. DINOv2 Extraction (ONNX)
+            # 3. DINOv2
             t_dino_start = time.perf_counter()
             batch_dino = self.engine.extract_dino_batch(crops) 
             t_dino = (time.perf_counter() - t_dino_start) * 1000
             
-            # 4. Global Search & Verification
+            # 4. Search
             t_search_start = time.perf_counter()
-            
-            # Vector Search (Dot Product)
             sim_matrix = np.dot(batch_dino, self.active_vectors)
             
             for i, crop in enumerate(crops):
                 best_idx = np.argmax(sim_matrix[i])
                 dino_score = sim_matrix[i][best_idx]
-                
-                # ❌ คอมเมนต์บรรทัดนี้ทิ้งไปก่อน (Disable Filter)
-                # if dino_score < CFG.MIN_DINO_SCORE: 
-                #     continue
-                
-                # ✅ เพิ่ม Print เพื่อดูว่าจริงๆ แล้วได้คะแนนเท่าไหร่?
                 matched_name = self.active_names[best_idx]
-                print(f"🧐 Debug: Box {i} matched '{matched_name}' with DINO score: {dino_score:.4f}")
 
-                # ... (ส่วน SIFT เหมือนเดิม) ...
-                
-                # --- SIFT Verification ---
+                # SIFT
                 t_sift_start = time.perf_counter()
                 q_des = self.engine.extract_sift(crop)
                 sift_score = self.get_sift_score(q_des, self.full_db_sift.get(matched_name, []))
                 t_sift_accum += (time.perf_counter() - t_sift_start) * 1000
-                # -------------------------
                 
-                # คำนวณคะแนนรวม
                 fusion = (dino_score * CFG.W_DINO) + (sift_score * CFG.W_SIFT)
                 
-                # --- LOGIC การแสดงผล (แก้ไขใหม่) ---
                 display_name = "Unknown"
                 is_correct_drug = False
                 
                 if fusion > CFG.VERIFY_THRESHOLD:
-                    # กรณี: มั่นใจว่าเป็นยานี้แน่ๆ
                     is_correct_drug = matched_name in self.rx.target_drugs
                     
                     if is_correct_drug:
-                        # ถูกต้อง: เป็นยาในใบสั่ง
                         display_name = self.rx.target_drugs[matched_name]['original']
-                        self.rx.verify(matched_name) # ติ๊กถูกในลิสต์
+                        self.rx.verify(matched_name)
+                        
+                        # --- ⏱️ STOP TIMER LOGIC ---
+                        if self.timer_running:
+                            elapsed = time.time() - self.timer_start_time
+                            self.timer_result_text = f"{display_name} : {elapsed:.2f} sec"
+                            self.timer_running = False # Stop Timer
+                            print(f"🏁 STOPWATCH: {self.timer_result_text}")
+                        # ---------------------------
                     else:
-                        # ผิด: เป็นยาที่มีใน Database แต่ไม่อยู่ในใบสั่ง
                         display_name = matched_name.upper()
                 else:
-                    # กรณี: ไม่มั่นใจ (คะแนนต่ำ) -> ให้โชว์เครื่องหมาย ? พร้อมคะแนน
                     display_name = f"? ({fusion:.2f})"
-                    is_correct_drug = False # ถือว่าผิดไว้ก่อน
+                    is_correct_drug = False
                 
-                # Append ลงผลลัพธ์เสมอ (เพื่อให้ UI วาดกรอบ)
                 temp_results.append({
                     'box': box_coords[i], 
                     'label': display_name, 
@@ -393,13 +379,12 @@ class AIProcessor:
             
             t_search = (time.perf_counter() - t_search_start) * 1000
 
-        # อัปเดตผลลัพธ์ไปยัง Thread หลัก
         with self.lock:
             self.results = temp_results
 
-        # --- FINAL LOGGING ---
         t_total = (time.perf_counter() - t_start_total) * 1000
-        print(f"⏱️ TOTAL: {t_total:.1f}ms | YOLO: {t_yolo:.1f} | DINO: {t_dino:.1f} | SIFT: {t_sift_accum:.1f} | Search: {t_search:.1f}")
+        # print(f"⏱️ TOTAL: {t_total:.1f}ms") 
+
     def start(self):
         threading.Thread(target=self.loop, daemon=True).start()
         return self
@@ -422,10 +407,12 @@ def draw_ui(frame: np.ndarray, ai_proc: AIProcessor):
     COLOR_GRAY = (150, 150, 150, 255)
     COLOR_RED = (0, 0, 255, 255)
     
+    # 1. Status Bar
     status_color = COLOR_GREEN if rx.is_completed else COLOR_CYAN
     status_text = "COMPLETED - RESETTING..." if rx.is_completed else f"PATIENT: {rx.patient_name}"
     draw_text(frame, status_text, (20, CFG.DISPLAY_SIZE[1] - 30), 0.7, status_color, 2)
 
+    # 2. Prescription List
     y_pos = 50
     draw_text(frame, "PRESCRIPTION:", (CFG.DISPLAY_SIZE[0] - 250, 30), 0.6, COLOR_YELLOW, 2)
     
@@ -437,43 +424,47 @@ def draw_ui(frame: np.ndarray, ai_proc: AIProcessor):
         draw_text(frame, text, (CFG.DISPLAY_SIZE[0] - 240, y_pos), 0.5, color, 1)
         y_pos += 30
 
+    # 3. Detection Boxes
     if not rx.is_completed:
         with ai_proc.lock:
             for res in ai_proc.results:
                 x1, y1, x2, y2 = res['box']
-                if res['is_correct']:
-                    color = COLOR_GREEN if res['conf'] > 0.8 else COLOR_CYAN
-                else:
-                    color = COLOR_RED 
-                
+                color = COLOR_GREEN if (res['is_correct'] and res['conf'] > 0.8) else (COLOR_CYAN if res['is_correct'] else COLOR_RED)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 
                 label_text = f"{res['label']} {res['conf']:.2f}"
-                if not res['is_correct']:
-                    label_text = f"WRONG: {res['label']}"
-                    
+                if not res['is_correct']: label_text = f"WRONG: {res['label']}"
                 draw_text(frame, label_text, (x1, y1-5), 0.4, color, 1)
 
-# ================= 🚀 MAIN =================
+    # --- ⏱️ 4. TIMER UI (BOTTOM RIGHT) ---
+    timer_pos = (CFG.DISPLAY_SIZE[0] - 350, CFG.DISPLAY_SIZE[1] - 30)
+    
+    if ai_proc.timer_running:
+        # กำลังจับเวลา: โชว์เวลาวิ่ง
+        elapsed = time.time() - ai_proc.timer_start_time
+        draw_text(frame, f"⏱️ TIME: {elapsed:.2f} s", timer_pos, 0.8, COLOR_YELLOW, 2)
+    elif ai_proc.timer_result_text:
+        # จบแล้ว: โชว์ผลลัพธ์ค้างไว้
+        draw_text(frame, f"🏁 {ai_proc.timer_result_text}", timer_pos, 0.7, COLOR_GREEN, 2)
+    else:
+        # Standby
+        draw_text(frame, "[Press T to Start Timer]", timer_pos, 0.5, COLOR_GRAY, 1)
+    # -----------------------------------
+
 # ================= 🚀 MAIN =================
 def main():
-    # 1. Sync Time (Optional)
     if SyncManager:
         try: SyncManager().sync()
         except: pass
 
-    # 2. Init Camera
     try: 
         camera = CameraHandler(width=CFG.DISPLAY_SIZE[0], height=CFG.DISPLAY_SIZE[1])
     except Exception as e:
         print(f"❌ Camera Error: {e}")
         return
 
-    # 3. Start AI
     ai = AIProcessor().start()
     
-    # ------------------ 🔥 DYNAMIC QUEUE LOADER 🔥 ------------------
-    # กำหนด Path ของไฟล์ Mock Data
     MOCK_DB_PATH = "mock_server/prescriptions.json" 
     hn_queue = deque()
 
@@ -481,83 +472,58 @@ def main():
         try:
             with open(MOCK_DB_PATH, 'r', encoding='utf-8') as f:
                 mock_data = json.load(f)
-            
-            # ดึงเฉพาะ HN (Keys) มาสร้างเป็นคิว
-            # เช่น ['HN123', 'HN456', 'HN789']
             hn_list = list(mock_data.keys())
             hn_queue = deque(hn_list)
-            
-            print(f"📂 Loaded {len(hn_list)} Patients from JSON: {hn_list}")
-            
-        except Exception as e:
-            print(f"❌ JSON Error: {e} -> Fallback to dummy HN")
+            print(f"📂 Loaded {len(hn_list)} Patients")
+        except:
             hn_queue = deque(["HN123"])
     else:
-        print(f"⚠️ File not found: {MOCK_DB_PATH} -> Using Hardcoded Fallback")
         hn_queue = deque(["HN123", "HN456"])
-    # ---------------------------------------------------------------
 
     current_hn = None
-    
     print(f"🚀 Started in {CFG.MODE} mode")
-    print("⌨️  Controls: [N] Next Patient | [Q] Quit")
+    print("⌨️  Controls: [N] Next Patient | [Q] Quit | [T] Start Timer")
 
-    # 4. Main Loop
     while True:
         frame = camera.get_frame()
         if frame is None:
             time.sleep(0.1)
             continue
         
-        # ส่งเฟรมให้ AI (Thread แยกจะจัดการเอง)
         ai.latest_frame = frame
         display_frame = frame.copy()
         
-        # --- UI LOGIC ---
         if ai.rx.is_ready:
-            # ถ้ามีข้อมูลยา -> วาด UI ปกติ
             draw_ui(display_frame, ai)
             
-            # ถ้าจ่ายยาครบแล้ว -> รอ 3 วิ แล้ว Reset อัตโนมัติ (หรือจะรอปุ่ม N ก็ได้แล้วแต่ดีไซน์)
             if ai.rx.is_completed:
                 if time.time() - ai.rx.complete_timestamp > 3.0:
-                    print("🔄 Completed! Auto-resetting state (Wait for Next Patient)...")
-                    ai.rx.reset() # เคลียร์หน้าจอ รอคนกด N คนต่อไป
+                    print("🔄 Completed! Auto-resetting...")
+                    ai.rx.reset() 
+                    # Reset Timer text too if needed, or keep it until N pressed
         else:
-            # ถ้ายังไม่มีข้อมูลยา (ว่างเปล่า)
             status_text = f"NEXT: {hn_queue[0]}" if hn_queue else "NO DATA"
             draw_text(display_frame, f"PRESS 'N' FOR {status_text}", (380, 360), 0.8, (0, 255, 255, 255), 2)
 
         cv2.imshow("PillTrack HIS (Global Search)", display_frame)
         
-        # --- CONTROL LOGIC ---
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'): 
             break
+        elif key == ord('t'): # <--- ปุ่ม T เพิ่มตรงนี้
+            ai.start_timer()
         elif key == ord('n'):
-            if not hn_queue:
-                print("⚠️ No more patients in queue!")
-                continue
-
-            # Rotate Queue (เอาคนแรกไปต่อท้าย หรือดึงออกมาเลยก็ได้)
-            # ถ้าใช้ .rotate(-1) คือวนลูปไม่รู้จบ (HN123 -> HN456 -> HN123)
+            if not hn_queue: continue
             hn_queue.rotate(-1)
             current_hn = hn_queue[0] 
-            
             print(f"\n⏩ Switching to Patient: {current_hn}")
-            
-            # Reset สถานะเก่าก่อน
             ai.rx.reset()
+            # Clear timer result when switching patient
+            ai.timer_result_text = ""
             
-            # เรียกข้อมูลจาก HISConnector (ซึ่งควรอ่านจากไฟล์เดียวกัน หรือ API)
             data = ai.his.fetch_prescription(current_hn)
-            
-            if data: 
-                ai.rx.update_from_his(data)
-            else:
-                print(f"❌ Failed to fetch data for {current_hn} (Check HN in JSON)")
+            if data: ai.rx.update_from_his(data)
 
-    # Cleanup
     camera.release()
     cv2.destroyAllWindows()
     print("👋 Exiting PillTrack...")
