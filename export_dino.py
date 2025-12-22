@@ -27,7 +27,7 @@ print("⏳ Exporting to ONNX (Clean Version)...")
 torch.onnx.export(
     model, 
     dummy_input, 
-    "dinov2_vits14.onnx",  # ทับไฟล์เดิมเลย
+    "dinov2_vitb14.onnx",  # ทับไฟล์เดิมเลย
     export_params=True, 
     opset_version=17, 
     do_constant_folding=True,
