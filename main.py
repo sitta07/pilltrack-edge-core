@@ -58,8 +58,8 @@ class Config:
     
     # Performance
     AI_FRAME_SKIP: int = 1
-    MIN_DINO_SCORE: float = 0.45
-    VERIFY_THRESHOLD: float = 0.5 
+    MIN_DINO_SCORE: float = 0.55
+    VERIFY_THRESHOLD: float = 0.55
     
     # Normalization (RGB based)
     MEAN: np.ndarray = field(default_factory=lambda: np.array([0.485, 0.456, 0.406], dtype=np.float32))
