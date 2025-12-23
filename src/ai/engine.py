@@ -9,7 +9,7 @@ class FeatureEngine:
         print("⏳ Loading DINOv2 (ONNX Runtime)...")
         try:
             # Load ONNX model
-            self.sess = ort.InferenceSession("dinov2_vitb14.onnx", providers=['CPUExecutionProvider'])
+            self.sess = ort.InferenceSession("models/dinov2_vitb14.onnx", providers=['CPUExecutionProvider'])
             self.input_name = self.sess.get_inputs()[0].name
         except Exception as e:
             print(f"❌ Error loading DINO ONNX: {e}")
