@@ -36,7 +36,7 @@ class AIProcessor:
             self.timer_running = False
             self.timer_start_time = 0
             self.timer_result_text = ""
-            print(f"⏳ Loading YOLO from {CFG.MODEL_PACK}...")`
+            print(f"⏳ Loading YOLO from {CFG.MODEL_PACK}...")
             self.yolo = YOLO(CFG.MODEL_PACK)
             print("✅ YOLO Loaded successfully!") 
         except Exception as e:
