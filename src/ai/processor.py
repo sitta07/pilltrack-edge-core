@@ -12,29 +12,36 @@ from src.core.prescription import PrescriptionManager
 
 class AIProcessor:
     def __init__(self):
-        self.rx = PrescriptionManager()
-        self.engine = FeatureEngine()
-        
-        self.full_db_vectors = {} 
-        self.active_vectors = None
-        self.active_names = []
-        
-        # Load DB
-        self._load_vector_db()
-        self._prepare_search_space()
-        
-        print(f"⏳ Loading YOLO from {CFG.MODEL_PACK}...")
-        self.yolo = YOLO(CFG.MODEL_PACK)
-        
-        # State Variables
-        self.latest_frame = None
-        self.results = []
-        self.lock = threading.Lock()
-        
-        # Timer Logic
-        self.timer_running = False
-        self.timer_start_time = 0
-        self.timer_result_text = ""
+        try:
+            ` self.rx = PrescriptionManager()
+            self.engine = FeatureEngine()
+            
+            self.full_db_vectors = {} 
+            self.active_vectors = None
+            self.active_names = []
+            
+            # Load DB
+            self._load_vector_db()
+            self._prepare_search_space()
+            
+            print(f"⏳ Loading YOLO from {CFG.MODEL_PACK}...")
+            self.yolo = YOLO(CFG.MODEL_PACK)
+            
+            # State Variables
+            self.latest_frame = None
+            self.results = []
+            self.lock = threading.Lock()
+            
+            # Timer Logic
+            self.timer_running = False
+            self.timer_start_time = 0
+            self.timer_result_text = ""
+            print(f"⏳ Loading YOLO from {CFG.MODEL_PACK}...")`
+            self.yolo = YOLO(CFG.MODEL_PACK)
+            print("✅ YOLO Loaded successfully!") 
+        except Exception as e:
+            print(f"❌ YOLO LOAD ERROR: {e}") # <--- เพิ่มบรรทัดนี้เพื่อดู Error จริงๆ
+            raise e
 
     def _load_vector_db(self):
         if not os.path.exists(CFG.DB_PACKS_VEC):
