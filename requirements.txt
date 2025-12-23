@@ -1,13 +1,24 @@
-# --- Core AI & Vision ---
-opencv-python
-numpy
+## python3 -m venv --system-site-packages .venv
+# sudo apt update
+# sudo apt install python3-picamera2
+
+torch>=2.0.0
+torchvision>=0.15.0
+ultralytics>=8.0.0
 onnxruntime
-ultralytics
+numpy<2.0.0
+pillow>=9.0.0
+opencv-python>=4.8.0
 
-# --- Cloud & Network ---
-boto3
+picamera2
+boto3                
+python-dotenv        
+requests             
+loguru             
+pydantic            
+onnxruntime
+faiss-cpu
+openvino
+fastapi
+uvicorn
 requests
-
-# --- Utilities ---
-pyyaml
-python-dotenv
