@@ -20,7 +20,7 @@ except FileNotFoundError:
 @dataclass
 class Config:
     # Paths
-    MODEL_PACK: str = os.path.abspath(yaml_cfg.get('artifacts', {}).get('model', 'models/model.pt'))
+    MODEL_PACK: str = os.path.abspath(yaml_cfg.get('artifacts', {}).get('model', 'models/seg_best_process.onnx'))
     DB_PACKS_VEC: str = "database/pill_fingerprints.pkl"
     DRUG_LIST_JSON: str = yaml_cfg.get('artifacts', {}).get('drug_list', 'database/drug_list.json')
     
