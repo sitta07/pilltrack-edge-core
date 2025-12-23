@@ -13,7 +13,7 @@ from src.core.prescription import PrescriptionManager
 class AIProcessor:
     def __init__(self):
         try:
-            ` self.rx = PrescriptionManager()
+            self.rx = PrescriptionManager()
             self.engine = FeatureEngine()
             
             self.full_db_vectors = {} 
