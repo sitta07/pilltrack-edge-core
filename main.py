@@ -10,6 +10,7 @@ from src.hardware.camera import CameraHandler
 from src.hardware.ui_renderer import UIRenderer
 from src.ai.processor import AIProcessor
 from src.services.his import HISConnector  # Assuming you have moved his_connector.py here or kept it in root
+from src.services.sync import SyncManager  # Import ตัวที่เราเพิ่งสร้าง
 
 # Optional Sync
 try:
@@ -19,9 +20,11 @@ except ImportError:
 
 def main():
     # 1. Sync Data
-    if SyncManager:
-        try: SyncManager().sync()
-        except: pass
+    try:
+        syncer = SyncManager() 
+        syncer.sync()
+    except Exception as e:
+        print(f"⚠️ Update Skipped: {e} (Starting with local version)")
 
     # 2. Setup Components
     print("🚀 Initializing PillTrack Edge...")
