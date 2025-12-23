@@ -2,14 +2,14 @@
   "HN001": {
     "patient_name": "Somchai Prasert",
     "prescription": [
-      {"drug_id": "D001", "name": "bufenac", "amount": 1},
-      {"drug_id": "D002", "name": "gluzolyte", "amount": 2}
+      {"drug_id": "D001", "name": "para30mg", "amount": 1},
+      {"drug_id": "D002", "name": "flotral", "amount": 2}
     ]
   },
   "HN002": {
     "patient_name": "Suda Wongyai",
     "prescription": [
-      {"drug_id": "D003", "name": "fah", "amount": 1}
+      {"drug_id": "D003", "name": "para40mg", "amount": 1}
     ]
   },
   "HN003": {
