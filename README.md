@@ -84,22 +84,25 @@ python main.py
 | **T** | Start / Stop the performance stopwatch |
 | **Q** | Gracefully stop the application and release camera resources |
 
-### Project Structure
+## 📁 Project Structure
+
+```text
 pilltrack-edge/
 ├── config.yaml          # Central configuration
 ├── main.py              # Application entry point
 ├── requirements.txt     # Python dependencies
 ├── .env                 # Secrets (Not committed)
-├── models/              # ONNX Models & Weights
-├── database/            # Vector DB & Drug Lists
-├── mock_server/         # Mock HIS Data
-├── scripts/             # Utility scripts (e.g., Model Export)
+├── models/              # ONNX models & weights
+├── database/            # Vector DB & drug lists
+├── mock_server/         # Mock HIS data
+├── scripts/             # Utility scripts (e.g. model export)
 └── src/
     ├── ai/              # Inference engines (YOLO, DINO)
     ├── hardware/        # Camera & UI drivers
-    ├── services/        # S3 Sync & HIS Connectors
-    ├── core/            # Business Logic
-    └── utils/           # Helpers & Config loaders
+    ├── services/        # S3 sync & HIS connectors
+    ├── core/            # Business logic
+    └── utils/           # Helpers & config loaders
+```
 
 ## 👨‍💻 Author
 
