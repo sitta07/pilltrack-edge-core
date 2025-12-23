@@ -11,7 +11,7 @@ artifacts:
   drug_list: 'database/drug_list.json'
 
 settings:
-  yolo_conf: 0.5
+  yolo_conf: 0.8
   ai_size: 336
 
 
