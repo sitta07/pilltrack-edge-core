@@ -46,8 +46,11 @@ git clone [https://github.com/your-org/pilltrack-edge.git](https://github.com/yo
 cd pilltrack-edge
 ```
 
-### 2. Install dependencies
+### 2. Create env & Install dependencies
 ```bash
+python3 -m venv --system-site-packages .venv
+sudo apt update
+sudo apt install python3-picamera2
 pip install -r requirements.txt
 ```
 
