@@ -6,12 +6,10 @@ display:
   height: 720
 
 artifacts:
-  model: 'models/seg_best_process.pt'      
-  pack_vec: 'database/pill_fingerprints.pkl' 
+  model: 'models/seg_best_process.pt'
+  pack_vec: 'database/pill_fingerprints.pkl'
   drug_list: 'database/drug_list.json'
 
 settings:
   yolo_conf: 0.8
   ai_size: 336
-
-
