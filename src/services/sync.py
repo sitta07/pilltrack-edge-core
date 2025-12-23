@@ -25,7 +25,7 @@ class SyncManager:
         self.files_to_sync = {
             "latest/register_model/pill_fingerprints.pkl": cfg['artifacts']['pack_vec'],
             "latest/register_model/drug_list.json": cfg['artifacts']['drug_list'],
-            "latest/register_model/seg_best_process.pt": cfg['artifacts']['model'] # ✅ แก้ให้ตรงชื่อไฟล์จริง
+            "latest/models/seg_best_process.pt": cfg['artifacts']['model'] # ✅ แก้ให้ตรงชื่อไฟล์จริง
         }
 
     def _is_s3_newer(self, s3_key, local_path):
