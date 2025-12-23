@@ -14,7 +14,7 @@ except FileNotFoundError:
         'artifacts': {
             'model': 'models/seg_best_process.pt', 
             'drug_list': 'database/drug_list.json',
-            'pack_vec': 'database/pill_fingerprints.pkl' # เพิ่มตรงนี้
+            'pack_vec': 'database/pill_fingerprints.pkl'
         },
         'display': {'width': 1280, 'height': 720},
         'settings': {'yolo_conf': 0.5},
@@ -30,7 +30,6 @@ class Config:
         yaml_cfg.get('artifacts', {}).get('model', 'models/seg_best_process.pt')
     )
     
-    # 2. Database Vector: ⚠️ แก้ตรงนี้! อย่า Hardcode ให้อ่านจาก yaml
     DB_PACKS_VEC: str = os.path.abspath(
         yaml_cfg.get('artifacts', {}).get('pack_vec', 'database/pill_fingerprints.pkl')
     )

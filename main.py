@@ -4,9 +4,7 @@ import cv2
 import os
 import json
 from collections import deque
-from dotenv import load_dotenv  # ✅ 1. เพิ่มบรรทัดนี้
-
-# ✅ 2. สั่งโหลด .env ทันทีที่รันไฟล์
+from dotenv import load_dotenv  
 load_dotenv() 
 
 # Import Modular Components

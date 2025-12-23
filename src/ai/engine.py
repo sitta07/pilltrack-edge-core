@@ -28,7 +28,6 @@ class FeatureEngine:
         for i, img in enumerate(crop_list):
             img_rgb = img[:, :, :3] 
             
-            # 🛠️ FIX 2: Resize รูปให้เป็นขนาดตาม Config (เช่น 336x336)
             img_resized = cv2.resize(img_rgb, (CFG.AI_SIZE, CFG.AI_SIZE), interpolation=cv2.INTER_LINEAR)
             
             # Normalize

@@ -6,22 +6,18 @@ from botocore.exceptions import ClientError, NoCredentialsError
 
 class SyncManager:
     def __init__(self, config_path="config.yaml"):
-        # เช็คว่ามี Config หรือไม่
         if not os.path.exists(config_path):
             raise FileNotFoundError(f"Config file not found: {config_path}")
 
         with open(config_path) as f:
             cfg = yaml.safe_load(f)
             
-        # ดึงค่าจาก env (ถ้าไม่มี จะได้ None ซึ่งเดี๋ยว boto3 จะฟ้องเอง)
         self.bucket_name = os.getenv('S3_BUCKET_NAME')
         if not self.bucket_name:
             raise ValueError("❌ S3_BUCKET_NAME is missing in .env file")
 
         self.s3 = boto3.client('s3')
         
-        # Mapping: S3 Path -> Local Path
-        # ✅ ต้องแก้ Path ฝั่งซ้ายให้ตรงกับบน S3 ของคุณเป๊ะๆ
         self.files_to_sync = {
             "latest/register_model/pill_fingerprints.pkl": cfg['artifacts']['pack_vec'],
             "latest/register_model/drug_list.json": cfg['artifacts']['drug_list'],
