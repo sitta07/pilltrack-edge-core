@@ -1,7 +1,13 @@
+# --- Core AI & Vision ---
 opencv-python
 numpy
 onnxruntime
 ultralytics
+
+# --- Cloud & Network ---
+boto3
 requests
+
+# --- Utilities ---
 pyyaml
 python-dotenv

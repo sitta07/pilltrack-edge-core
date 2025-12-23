@@ -6,9 +6,14 @@ display:
   height: 720
 
 artifacts:
-  model: 'models/seg_best_process.pt'          # <-- ต้องตรงกับ SyncManager
-  pack_vec: 'database/pill_fingerprints.pkl'   # <-- Key นี้ต้องมี
+  model: 'models/seg_best_process.pt'      
+  pack_vec: 'database/pill_fingerprints.pkl' 
   drug_list: 'database/drug_list.json'
 
 settings:
   yolo_conf: 0.5
+
+
+
+      dino_size = 336
+    dummy_input = torch.randn(1, 3, dino_size, dino_size)
