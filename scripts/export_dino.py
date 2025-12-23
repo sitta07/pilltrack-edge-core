@@ -20,8 +20,8 @@ def export_model():
     # เอา Wrapper มาครอบ
     model = DinoWrapper(raw_model)
 
-    # สร้าง Dummy Input (ขนาดต้องตรงกับที่ใช้จริงคือ 224x224)
-    dummy_input = torch.randn(1, 3, 224, 224)
+    dino_size = 336
+    dummy_input = torch.randn(1, 3, dino_size, dino_size)
     
     output_file = "models/dinov2_vitb14.onnx"
 
