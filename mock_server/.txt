@@ -2,21 +2,21 @@
   "HN001": {
     "patient_name": "Somchai Prasert",
     "prescription": [
-      {"drug_id": "D001", "name": "bufenac", "amount": 1},
-      {"drug_id": "D002", "name": "gluzolyte", "amount": 2}
+      {"drug_id": "D001", "name": "alzime", "amount": 1},
+      {"drug_id": "D002", "name": "paracap", "amount": 2}
     ]
   },
   "HN002": {
     "patient_name": "Suda Wongyai",
     "prescription": [
-      {"drug_id": "D003", "name": "fah", "amount": 1}
+      {"drug_id": "D003", "name": "bufenac", "amount": 1}
     ]
   },
   "HN003": {
     "patient_name": "Anan Chaiyasit",
     "prescription": [
-      {"drug_id": "D004", "name": "noxa", "amount": 1},
-      {"drug_id": "D005", "name": "turmeric", "amount": 1}
+      {"drug_id": "D004", "name": "civoxin", "amount": 1},
+      {"drug_id": "D005", "name": "decolgen", "amount": 1}
     ]
   },
   "HN004": {
@@ -28,13 +28,13 @@
   "HN005": {
     "patient_name": "Kittipong Nualdee",
     "prescription": [
-      {"drug_id": "D007", "name": "civoxin", "amount": 1}
+      {"drug_id": "D007", "name": "flotral", "amount": 1}
     ]
   },
   "HN006": {
     "patient_name": "Waraporn Intanon",
     "prescription": [
-      {"drug_id": "D008", "name": "flotral", "amount": 2},
+      {"drug_id": "D008", "name": "gluzolyte", "amount": 2},
       {"drug_id": "D009", "name": "hydroquin", "amount": 1}
     ]
   },
