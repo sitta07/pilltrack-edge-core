@@ -45,7 +45,7 @@ class Config:
         yaml_cfg.get('display', {}).get('width', 1280),
         yaml_cfg.get('display', {}).get('height', 720)
     )
-    AI_SIZE: int = 224
+    AI_SIZE: int = yaml_cfg.get('settings', {}).get('ai_size', 336)
     CONF_THRESHOLD: float = yaml_cfg.get('settings', {}).get('yolo_conf', 0.5)
     MODE: str = yaml_cfg.get('operation', {}).get('mode', 'standalone')
 
