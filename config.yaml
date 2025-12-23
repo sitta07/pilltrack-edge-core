@@ -17,14 +17,14 @@ his_api:
 # --- 📦 Artifacts: ไฟล์สำคัญที่ต้อง Sync ขึ้น S3 ---
 artifacts:
   model: "models/seg_best_process.pt"   #seg_best_process   
-  pack_vec: "database/pill_fingerprints.pkl" 
-  drug_list: "database/drug_list.json"     
+  pack_vec: "register_model/pill_fingerprints.pkl" 
+  drug_list: "register_model/drug_list.json"     
 
 # --- 📂 Paths: โครงสร้างโฟลเดอร์ ---
 paths:
   db_images: "database_images"             
   models_folder: "models"                  
-  db_pkl_folder: "database"                
+  db_pkl_folder: "register_model"                
 
 # --- ⚙️ Settings: จูนค่า AI (คงไว้ตามเดิมของคุณ) ---
 settings:
