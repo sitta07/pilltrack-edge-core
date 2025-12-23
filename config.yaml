@@ -1,42 +1,15 @@
-# =============================================================
-# PILLTRACK SYSTEM CONFIGURATION (Hybrid Engine: DINO + SIFT)
-# =============================================================
-
-# --- 🚀 [NEW] Operation Mode: เลือกโหมดการทำงาน ---
-operation:
-  mode: "integrated"        # ตัวเลือก: "standalone" (ตรวจอิสระ) หรือ "integrated" (ตรวจตามใบสั่ง)
-  allow_mismatch: false     # ถ้าตรวจแล้วยาไม่ตรงใบสั่ง จะให้ผ่านไหม? (Senior ต้องคิดเผื่อ Error)
-
-# --- 🏥 [NEW] HIS API Connection: การเชื่อมต่อระบบโรงพยาบาล ---
-his_api:
-  base_url: "http://127.0.0.1:8000"  # URL ของ Mock API ที่เราจะรันใน Terminal 1
-  endpoints:
-    get_prescription: "/get-prescription/"
-  timeout: 5                         # ป้องกันโปรแกรมค้างถ้า Server โรงพยาบาลตอบช้า
-
-# --- 📦 Artifacts: ไฟล์สำคัญที่ต้อง Sync ขึ้น S3 ---
-artifacts:
-  model: "models/seg_best_process.pt"   #seg_best_process   
-  pack_vec: "register_model/pill_fingerprints.pkl" 
-  drug_list: "register_model/drug_list.json"     
-
-# --- 📂 Paths: โครงสร้างโฟลเดอร์ ---
-paths:
-  db_images: "database_images"             
-  models_folder: "models"                  
-  db_pkl_folder: "register_model"                
-
-# --- ⚙️ Settings: จูนค่า AI (คงไว้ตามเดิมของคุณ) ---
-settings:
-  dino_size: 336                           
-  yolo_conf: 0.6                          
-  w_dino: 0.70                             
-  w_sift: 0.30                             
-  sift_saturation: 20                      
-  efficiency_target: 40                    
-
-# --- 🖥️ UI & Display ---
+system:
+  mode: standalone  # standalone / connected
+  camera_id: 0
+  
 display:
   width: 1280
   height: 720
-  ui_zone_x: 850
+
+ai:
+  model_path: 'models/seg_best_process.pt'
+  db_path: 'database/pill_fingerprints.pkl'
+  conf_threshold: 0.5
+
+endpoints:
+  his_api: 'http://localhost:8000/api'

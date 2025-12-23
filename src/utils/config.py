@@ -1,0 +1,45 @@
+import yaml
+import os
+import numpy as np
+from dataclasses import dataclass, field
+from typing import Tuple
+
+# Load YAML
+try:
+    with open("config.yaml", "r") as f:
+        yaml_cfg = yaml.safe_load(f)
+except FileNotFoundError:
+    # Default config fallback
+    yaml_cfg = {
+        'artifacts': {'model': 'models/seg_best_process.pt', 'drug_list': 'database/drug_list.json'},
+        'display': {'width': 1280, 'height': 720},
+        'settings': {'yolo_conf': 0.5},
+        'operation': {'mode': 'standalone'}
+    }
+
+@dataclass
+class Config:
+    # Paths
+    MODEL_PACK: str = os.path.abspath(yaml_cfg.get('artifacts', {}).get('model', 'models/model.pt'))
+    DB_PACKS_VEC: str = "database/pill_fingerprints.pkl"
+    DRUG_LIST_JSON: str = yaml_cfg.get('artifacts', {}).get('drug_list', 'database/drug_list.json')
+    
+    # Display & AI
+    DISPLAY_SIZE: Tuple[int, int] = (
+        yaml_cfg.get('display', {}).get('width', 1280),
+        yaml_cfg.get('display', {}).get('height', 720)
+    )
+    AI_SIZE: int = 224
+    CONF_THRESHOLD: float = yaml_cfg.get('settings', {}).get('yolo_conf', 0.5)
+    MODE: str = yaml_cfg.get('operation', {}).get('mode', 'standalone')
+
+    # Logic Constants
+    VERIFY_THRESHOLD: float = 0.6
+    AI_FRAME_SKIP: int = 2  # เพิ่ม skip เพื่อลด load บน Pi
+
+    # Normalization
+    MEAN: np.ndarray = field(default_factory=lambda: np.array([0.485, 0.456, 0.406], dtype=np.float32))
+    STD: np.ndarray = field(default_factory=lambda: np.array([0.229, 0.224, 0.225], dtype=np.float32))
+
+# Singleton Instance
+CFG = Config()

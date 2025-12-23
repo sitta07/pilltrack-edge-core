@@ -1,2 +1,8 @@
+__pycache__/
+*.pyc
 .env
-database
+.DS_Store
+logs/
+models/
+database/
+before_refactor/
