@@ -1,15 +1,14 @@
 system:
-  mode: standalone  # standalone / connected
-  camera_id: 0
-  
+  mode: standalone
+
 display:
   width: 1280
   height: 720
 
-ai:
-  model_path: 'models/seg_best_process.pt'
-  db_path: 'database/pill_fingerprints.pkl'
-  conf_threshold: 0.5
+artifacts:
+  model: 'models/seg_best_process.pt'          # <-- ต้องตรงกับ SyncManager
+  pack_vec: 'database/pill_fingerprints.pkl'   # <-- Key นี้ต้องมี
+  drug_list: 'database/drug_list.json'
 
-endpoints:
-  his_api: 'http://localhost:8000/api'
+settings:
+  yolo_conf: 0.5
