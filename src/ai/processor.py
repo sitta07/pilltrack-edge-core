@@ -81,72 +81,104 @@ class AIProcessor:
             time.sleep(0.01)
 
     def process(self, frame: np.ndarray):
-        if not self.rx.is_ready or self.rx.is_completed: return
-        if self.active_vectors is None: return
+            # 0. Safety Checks
+            if not self.rx.is_ready or self.rx.is_completed: return
+            if self.active_vectors is None: return
 
-        # 1. YOLO Detect
-        img_resized = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE))
-        res = self.yolo(img_resized, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
+            # ---------------------------------------------------------
+            # 🛠️ FIX: Convert RGBA (4 channels) -> RGB (3 channels)
+            # กล้อง Picamera2 ส่งมา 4 ช่อง แต่ YOLO รับได้แค่ 3 ช่อง
+            # ---------------------------------------------------------
+            if frame.shape[2] == 4:
+                frame = frame[:, :, :3]  # ตัดช่อง Alpha ทิ้งไป
+            # ---------------------------------------------------------
 
-        if res.boxes is None or len(res.boxes) == 0:
-            with self.lock: self.results = []
-            return
+            # 1. YOLO Detect
+            # Resize ลงมาตาม config (เช่น 224x224 หรือ 640x640) เพื่อความเร็ว
+            img_resized = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE))
+            
+            # ส่งเข้า YOLO (verbose=False เพื่อไม่ให้รก Terminal)
+            res = self.yolo(img_resized, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
 
-        # 2. Crop
-        sx, sy = CFG.DISPLAY_SIZE[0] / CFG.AI_SIZE, CFG.DISPLAY_SIZE[1] / CFG.AI_SIZE
-        crops, box_coords = [], []
-        
-        for box in res.boxes:
-            x1, y1, x2, y2 = box.xyxy[0].int().tolist()
-            # Scale coords back to display size
-            dx1, dy1, dx2, dy2 = int(x1*sx), int(y1*sy), int(x2*sx), int(y2*sy)
-            
-            # Clamp
-            h, w = frame.shape[:2]
-            dx1, dy1 = max(0, dx1), max(0, dy1)
-            dx2, dy2 = min(w, dx2), min(h, dy2)
-            
-            crop = frame[dy1:dy2, dx1:dx2]
-            if crop.size > 0: 
-                crops.append(crop)
-                box_coords.append([dx1, dy1, dx2, dy2])
+            if res.boxes is None or len(res.boxes) == 0:
+                with self.lock: self.results = []
+                return
 
-        temp_results = []
-        if crops:
-            # 3. DINO Embed
-            batch_dino = self.engine.extract_dino_batch(crops)
+            # 2. Crop & Scale Coordinates
+            # ต้องคำนวณ Scale กลับไปเป็นขนาดหน้าจอ Display (1280x720)
+            sx = CFG.DISPLAY_SIZE[0] / CFG.AI_SIZE
+            sy = CFG.DISPLAY_SIZE[1] / CFG.AI_SIZE
             
-            # 4. Global Search (Dot Product)
-            sim_matrix = np.dot(batch_dino, self.active_vectors)
+            crops = []
+            box_coords = []
             
-            for i, _ in enumerate(crops):
-                best_idx = np.argmax(sim_matrix[i])
-                score = sim_matrix[i][best_idx]
-                matched_name = self.active_names[best_idx]
+            h_orig, w_orig = frame.shape[:2] # ขนาดภาพต้นฉบับหลังตัด Alpha
+
+            for box in res.boxes:
+                x1, y1, x2, y2 = box.xyxy[0].int().tolist()
                 
-                display_name = "Unknown"
-                is_correct = False
+                # Scale coordinates back to original frame size for display
+                dx1, dy1 = int(x1 * sx), int(y1 * sy)
+                dx2, dy2 = int(x2 * sx), int(y2 * sy)
                 
-                if score > CFG.VERIFY_THRESHOLD:
-                    is_correct = self.rx.verify(matched_name)
-                    if is_correct:
-                        display_name = self.rx.target_drugs[normalize_name(matched_name)]['original']
-                        # Stop Timer check
-                        if self.timer_running:
-                            elapsed = time.time() - self.timer_start_time
-                            self.timer_result_text = f"{display_name} : {elapsed:.2f}s"
-                            self.timer_running = False
+                # Clamp coordinates (กันหลุดขอบภาพ)
+                dx1, dy1 = max(0, dx1), max(0, dy1)
+                dx2, dy2 = min(w_orig, dx2), min(h_orig, dy2)
+                
+                # ตัดภาพจาก Frame ต้นฉบับ (ที่ชัดกว่า) เพื่อส่งไปเข้า DINO
+                crop = frame[dy1:dy2, dx1:dx2]
+                
+                if crop.size > 0: 
+                    crops.append(crop)
+                    box_coords.append([dx1, dy1, dx2, dy2])
+
+            temp_results = []
+            if crops:
+                # 3. DINO Feature Extraction
+                # แปลงภาพ Crop เป็น Vector
+                batch_dino = self.engine.extract_dino_batch(crops)
+                
+                # 4. Global Search (Dot Product Similarity)
+                # เอา Vector ที่ได้ ไปเทียบกับ Database ทั้งหมด
+                sim_matrix = np.dot(batch_dino, self.active_vectors)
+                
+                for i, _ in enumerate(crops):
+                    # หาตัวที่เหมือนที่สุด (Max Score)
+                    best_idx = np.argmax(sim_matrix[i])
+                    score = sim_matrix[i][best_idx]
+                    matched_name = self.active_names[best_idx]
+                    
+                    display_name = "Unknown"
+                    is_correct = False
+                    
+                    # 5. Verification Logic
+                    if score > CFG.VERIFY_THRESHOLD:
+                        # เช็คกับใบสั่งยา (Business Logic)
+                        is_correct = self.rx.verify(matched_name)
+                        
+                        if is_correct:
+                            # ถ้าถูกต้อง ให้ดึงชื่อจริงจาก Database มาโชว์
+                            display_name = self.rx.target_drugs[normalize_name(matched_name)]['original']
+                            
+                            # Stop Timer check (ถ้าจับเวลาอยู่)
+                            if self.timer_running:
+                                elapsed = time.time() - self.timer_start_time
+                                self.timer_result_text = f"{display_name} : {elapsed:.2f}s"
+                                self.timer_running = False
+                        else:
+                            # เจอยาใน DB แต่ไม่ใช่ยาที่สั่ง
+                            display_name = matched_name.upper()
                     else:
-                        display_name = matched_name.upper()
-                else:
-                    display_name = f"? ({score:.2f})"
+                        # Score ต่ำเกินไป ไม่มั่นใจ
+                        display_name = f"? ({score:.2f})"
 
-                temp_results.append({
-                    'box': box_coords[i], 
-                    'label': display_name, 
-                    'conf': score,
-                    'is_correct': is_correct
-                })
+                    temp_results.append({
+                        'box': box_coords[i], 
+                        'label': display_name, 
+                        'conf': score,
+                        'is_correct': is_correct
+                    })
 
-        with self.lock:
-            self.results = temp_results
+            # 6. Update Shared Results (Thread Safe)
+            with self.lock:
+                self.results = temp_results
