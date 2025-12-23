@@ -30,8 +30,7 @@ def export_model():
     # เอา Wrapper มาครอบ
     model = DinoWrapper(raw_model)
 
-    dino_size = 336
-    dummy_input = torch.randn(1, 3, dino_size, dino_size)
+    dummy_input = torch.randn(1, 3, 336, 336)
     
     # ==========================================
     # 2. Path Handling (แก้เรื่อง No such file)
