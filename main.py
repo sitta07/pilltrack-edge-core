@@ -4,29 +4,37 @@ import cv2
 import os
 import json
 from collections import deque
+from dotenv import load_dotenv  # ✅ 1. เพิ่มบรรทัดนี้
+
+# ✅ 2. สั่งโหลด .env ทันทีที่รันไฟล์
+load_dotenv() 
 
 # Import Modular Components
 from src.hardware.camera import CameraHandler
 from src.hardware.ui_renderer import UIRenderer
 from src.ai.processor import AIProcessor
-from src.services.his import HISConnector  # Assuming you have moved his_connector.py here or kept it in root
-from src.services.sync import SyncManager  # Import ตัวที่เราเพิ่งสร้าง
-
-# Optional Sync
-try:
-    from src.services.sync import SyncManager # Or from sync_manager if stored in root
-except ImportError:
-    SyncManager = None
+from src.services.his import HISConnector
+from src.services.sync import SyncManager  # Import ตัว Sync
 
 def main():
-    # 1. Sync Data
+    # ==========================================
+    # 1. ☁️ AUTO UPDATE (SMART SYNC)
+    # ==========================================
+    print("🔄 Connecting to S3 system...")
     try:
         syncer = SyncManager() 
         syncer.sync()
     except Exception as e:
-        print(f"⚠️ Update Skipped: {e} (Starting with local version)")
+        # ✅ 3. ปริ้นท์ Error สีแดงออกมาให้เห็นชัดๆ
+        print(f"\n{'='*40}")
+        print(f"❌ S3 SYNC FAILED: {e}")
+        print(f"{'='*40}")
+        print("💡 Hint: Check your .env file / Internet connection.")
+        print("⚠️  Starting system with LOCAL files only...\n")
 
+    # ==========================================
     # 2. Setup Components
+    # ==========================================
     print("🚀 Initializing PillTrack Edge...")
     try:
         camera = CameraHandler()
