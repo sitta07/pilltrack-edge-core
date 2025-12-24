@@ -49,8 +49,8 @@ class Config:
     MODE: str = yaml_cfg.get('operation', {}).get('mode', 'standalone')
 
     # Logic Constants
-    VERIFY_THRESHOLD: float = 0.6
-    AI_FRAME_SKIP: int = 2
+    VERIFY_THRESHOLD: float = 0.8
+    AI_FRAME_SKIP: int = 1
 
     # Normalization
     MEAN: np.ndarray = field(default_factory=lambda: np.array([0.485, 0.456, 0.406], dtype=np.float32))
