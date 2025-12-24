@@ -1,7 +1,8 @@
 # PillTrack Edge
 
 ![Status](https://img.shields.io/badge/Status-Beta-yellow?style=flat-square)
-![Platform](https://img.shields.io/badge/Platform-Raspberry_Pi_4%2F5-C51A4A?style=flat-square&logo=raspberrypi)
+![Platform](https://img.shields.io/badge/Platform-Mini_PC_x86-0078D7?style=flat-square&logo=linux)
+![Architecture](https://img.shields.io/badge/Architecture-Headless_Server-orange?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?style=flat-square&logo=python)
 ![AWS](https://img.shields.io/badge/Cloud-AWS_S3-232F3E?style=flat-square&logo=amazon-aws)
 
@@ -15,7 +16,7 @@ Designed to run efficiently on **ARM-based Edge Devices** (Raspberry Pi) with au
 
 The system operates on a retrieval-based pipeline:
 
-1.  **Acquisition:** Captures high-res frames via `Picamera2` (XRGB8888) or OpenCV.
+1.  **Acquisition:** Captures frames via **USB Webcam** using OpenCV (Multithreaded).
 2.  **Detection:** YOLOv8 (Nano/Small) localizes pill instances in the frame.
 3.  **Embedding:** Cropped instances are processed by **DINOv2 (ViT-B/14)** via ONNX Runtime to generate vector embeddings.
 4.  **Identification:** Vectors are compared against a local vector database using Cosine Similarity.
@@ -36,7 +37,8 @@ The system operates on a retrieval-based pipeline:
 ## Installation
 
 ### Prerequisites
-* Raspberry Pi 4 (4GB+) or Raspberry Pi 5
+* Mini PC (Intel/AMD) running Ubuntu 22.04+ or similar Linux.
+* USB Webcam connected.
 * Python 3.9 or higher
 * AWS Credentials (for S3 Sync)
 
@@ -48,9 +50,14 @@ cd pilltrack-edge
 
 ### 2. Create env & Install dependencies
 ```bash
-python3 -m venv --system-site-packages .venv
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install System Libraries for OpenCV (Headless)
 sudo apt update
-sudo apt install python3-picamera2
+sudo apt install -y libgl1 libglib2.0-0
+
+# Install Python Requirements
 pip install -r requirements.txt
 ```
 
@@ -73,19 +80,14 @@ settings:
 ```
 
 ### Usage
-Run the main orchestrator:
-
+1. **Start the Server** on Mini PC:
 ```bash
 python main.py
 ```
-
-## Controls
-
-| Key | Action |
-|----|--------|
-| **N** | Load the next patient prescription from the queue |
-| **T** | Start / Stop the performance stopwatch |
-| **Q** | Gracefully stop the application and release camera resources |
+2. **Access Dashboard via Browser** (Laptop/Tablet):
+```bash
+http://<MINI_PC_IP>:5000
+```
 
 ## 📁 Project Structure
 
