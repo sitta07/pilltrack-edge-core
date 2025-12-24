@@ -44,7 +44,7 @@ The system operates on a retrieval-based pipeline:
 
 ### 1. Clone the repository
 ```bash
-git clone [https://github.com/your-org/pilltrack-edge.git](https://github.com/your-org/pilltrack-edge.git)
+git clone https://github.com/sitta07/pilltrack-edge-core.git
 cd pilltrack-edge
 ```
 
