@@ -24,3 +24,4 @@ requests
 onnx
 opencv-python-headless
 flask
+onnxscript
