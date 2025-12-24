@@ -76,7 +76,7 @@ def main():
         # else:
         #     status = f"NEXT: {hn_queue[0]}" if hn_queue else "NO DATA"
         #     cv2.putText(display_frame, f"PRESS 'N' FOR {status}", (380, 360), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
-
+        #
         cv2.imshow("PillTrack Edge", display_frame)
 
         # Controls
