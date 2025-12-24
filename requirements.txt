@@ -10,7 +10,6 @@ numpy<2.0.0
 pillow>=9.0.0
 opencv-python>=4.8.0
 
-picamera2
 boto3                
 python-dotenv        
 requests             
@@ -23,3 +22,5 @@ fastapi
 uvicorn
 requests
 onnx
+opencv-python-headless
+flask

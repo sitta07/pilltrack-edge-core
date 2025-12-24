@@ -1,49 +1,55 @@
 import cv2
+import time
 from src.utils.config import CFG
 
 class CameraHandler:
     def __init__(self):
+        # 1. ดึงค่า Config ขนาดภาพ
         self.width = CFG.DISPLAY_SIZE[0]
         self.height = CFG.DISPLAY_SIZE[1]
-        self.use_picamera = False
         self.cap = None
-        self.picam = None
         
-        try:
-            from picamera2 import Picamera2
-            self.picam = Picamera2()
-            config = self.picam.create_preview_configuration(
-                main={"size": (self.width, self.height), "format": "XRGB8888"}
-            )
-            self.picam.configure(config)
-            self.picam.start()
-            self.use_picamera = True
-            print("📷 Camera: Using Picamera2 (XRGB8888)")
-        except ImportError:
-            print("⚠️ Picamera2 not found. Falling back to OpenCV.")
-            self._init_opencv()
-        except Exception as e:
-            print(f"⚠️ Camera Error: {e}. Falling back to OpenCV.")
-            self._init_opencv()
+        # 2. เริ่มต้นกล้อง USB (ตัด Picamera ทิ้งไปเลย)
+        print("📷 Initializing USB Camera...")
+        self._init_opencv()
 
     def _init_opencv(self):
-        self.use_picamera = False
-        self.cap = cv2.VideoCapture(0)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        """เปิดกล้อง USB ด้วย OpenCV"""
+        try:
+            # เลข 0 คือกล้องตัวแรก (ถ้าเสียบหลายตัวอาจจะเป็น 1, 2)
+            self.cap = cv2.VideoCapture(0)
+            
+            # ตั้งค่าความละเอียด
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            
+            # ตรวจสอบว่าเปิดติดไหม
+            if not self.cap.isOpened():
+                raise Exception("Could not open video device (Index 0)")
+                
+            print(f"✅ Camera Started: {self.width}x{self.height}")
+            
+        except Exception as e:
+            print(f"❌ Camera Error: {e}")
+            self.cap = None
 
     def get_frame(self):
-        if self.use_picamera:
-            return self.picam.capture_array()
-        else:
-            if not self.cap.isOpened(): return None
-            ret, frame = self.cap.read()
-            if not ret: return None
-            # OpenCV is BGR -> Convert to RGB/RGBA
-            return cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+        """อ่านภาพ 1 เฟรม"""
+        if self.cap is None or not self.cap.isOpened():
+            print("⚠️ Camera is not opened, trying to reconnect...")
+            self._init_opencv()
+            return None
+
+        ret, frame = self.cap.read()
+        if not ret:
+            print("⚠️ Failed to grab frame")
+            return None
+
+        # ✅ แก้ตรงนี้: แปลงจาก BGR (ค่าเดิม) -> RGB (เพื่อให้ AI เข้าใจถูก)
+        return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
     def release(self):
-        if self.use_picamera and self.picam:
-            self.picam.stop()
-        elif self.cap:
+        """คืนค่ากล้องเมื่อปิดโปรแกรม"""
+        if self.cap:
             self.cap.release()
+            print("📷 Camera Released")
