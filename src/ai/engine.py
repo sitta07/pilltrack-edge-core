@@ -7,7 +7,7 @@ from src.utils.config import CFG
 
 class FeatureEngine:
     def __init__(self):
-        self.DINO_SIZE = 224 
+        self.DINO_SIZE = 336 
         
         print(f"⏳ Loading DINOv2 (Target Input: {self.DINO_SIZE}x{self.DINO_SIZE})...")
         try:
