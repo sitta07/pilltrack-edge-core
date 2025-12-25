@@ -49,7 +49,7 @@ class Config:
     MODE: str = yaml_cfg.get('operation', {}).get('mode', 'standalone')
 
     # Logic Constants
-    VERIFY_THRESHOLD: float = 0.15
+    VERIFY_THRESHOLD: float = 0.8
     AI_FRAME_SKIP: int = 1
 
     # Normalization

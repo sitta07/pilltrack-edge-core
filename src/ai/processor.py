@@ -119,7 +119,7 @@ class AIProcessor:
         img_resized = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE))
         img_input = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
         
-        results = self.yolo(img_input, conf=0.25, verbose=False)
+        results = self.yolo(img_input, conf=0.8, verbose=False)
         res = results[0]
         
         yolo_ms = (time.perf_counter() - t_start_yolo) * 1000
