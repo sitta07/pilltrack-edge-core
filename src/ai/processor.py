@@ -28,7 +28,7 @@ class AIProcessor:
             print(f"⏳ Loading Detection Model from {CFG.MODEL_PACK}...")
             
             # task='detect' สำคัญมากสำหรับ ONNX เพื่อให้ Library รู้ว่าจะเตรียม Output แบบไหน
-            self.yolo = YOLO(CFG.MODEL_PACK, task='detect') 
+            self.yolo = YOLO(CFG.MODEL_PACK, task='segment') 
             
             print(f"✅ Model Loaded successfully! (Source: {CFG.MODEL_PACK})") 
             
