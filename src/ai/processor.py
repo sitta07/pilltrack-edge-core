@@ -30,10 +30,6 @@ class AIProcessor:
             # task='detect' สำคัญมากสำหรับ ONNX เพื่อให้ Library รู้ว่าจะเตรียม Output แบบไหน
             self.yolo = YOLO(CFG.MODEL_PACK, task='detect') 
             
-            # Warmup (Optional): รันภาพเปล่า 1 ครั้ง เพื่อให้ ONNX Runtime โหลด Provider รอไว้เลย
-            # dummy_img = np.zeros((CFG.AI_SIZE, CFG.AI_SIZE, 3), dtype=np.uint8)
-            # self.yolo(dummy_img, verbose=False)
-            
             print(f"✅ Model Loaded successfully! (Source: {CFG.MODEL_PACK})") 
             
             # State Variables
@@ -95,96 +91,107 @@ class AIProcessor:
             time.sleep(0.01)
 
     def process(self, frame: np.ndarray):
-            # 0. Safety Checks
-            if not self.rx.is_ready or self.rx.is_completed: return
-            if self.active_vectors is None: return
+        # 0. Safety Checks
+        if not self.rx.is_ready or self.rx.is_completed: return
+        if self.active_vectors is None: return
 
-            # ---------------------------------------------------------
-            if frame.shape[2] == 4:
-                frame = frame[:, :, :3]  # ตัดช่อง Alpha ทิ้งไป
-            # ---------------------------------------------------------
+        # ---------------------------------------------------------
+        # Handle Alpha Channel
+        if frame.shape[2] == 4:
+            frame = frame[:, :, :3]  # ตัดช่อง Alpha ทิ้งไป
+        # ---------------------------------------------------------
 
-            # 1. YOLO Detect
-            # Resize ลงมาตาม config
-            img_resized = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE))
+        # 1. Prepare Image for YOLO
+        # Resize ลงมาตาม config
+        img_resized = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE))
+        
+        # [FIX 1] Force RGB Conversion
+        # ONNX มักจะต้องการ RGB เป๊ะๆ เพื่อให้ Detect เจอ (OpenCV default คือ BGR)
+        img_input = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+
+        # [FIX 2] Inference with Lower Threshold & Debug
+        # ลด conf ลงเหลือ 0.25 เพื่อดูว่า ONNX เจออะไรบ้างไหม (ONNX บางที score ดรอปกว่า pt)
+        results = self.yolo(img_input, conf=0.25, verbose=False)
+        res = results[0]
+
+        # [DEBUG] ปริ้นท์บอกถ้าไม่เจออะไรเลย (Uncomment เพื่อ Debug)
+        if res.boxes is None or len(res.boxes) == 0:
+            # print("DEBUG: No boxes detected") 
+            with self.lock: self.results = []
+            return
+
+        # 2. Crop & Scale Coordinates
+        sx = CFG.DISPLAY_SIZE[0] / CFG.AI_SIZE
+        sy = CFG.DISPLAY_SIZE[1] / CFG.AI_SIZE
+        
+        crops = []
+        box_coords = []
+        
+        h_orig, w_orig = frame.shape[:2]
+
+        for box in res.boxes:
+            # [FIX 3] Robust Coordinate Extraction
+            # ใช้ .cpu().numpy() แล้ว cast int เอง ปลอดภัยที่สุดสำหรับ ONNX Output
+            # (ดีกว่า .int().tolist() ที่อาจเพี้ยนกับบาง backend)
+            coords = box.xyxy[0].cpu().numpy().astype(int)
+            x1, y1, x2, y2 = coords
             
-            # [MODIFIED] Inference
-            # Ultralytics จะจัดการ ONNX backend ให้เอง ได้ผลลัพธ์เป็น Results object เหมือนเดิมเป๊ะ
-            res = self.yolo(img_resized, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
+            # Scale coordinates
+            dx1, dy1 = int(x1 * sx), int(y1 * sy)
+            dx2, dy2 = int(x2 * sx), int(y2 * sy)
+            
+            # Clamp coordinates
+            dx1, dy1 = max(0, dx1), max(0, dy1)
+            dx2, dy2 = min(w_orig, dx2), min(h_orig, dy2)
+            
+            crop = frame[dy1:dy2, dx1:dx2]
+            
+            if crop.size > 0: 
+                crops.append(crop)
+                box_coords.append([dx1, dy1, dx2, dy2])
 
-            if res.boxes is None or len(res.boxes) == 0:
-                with self.lock: self.results = []
+        temp_results = []
+        if crops:
+            # 3. DINO Feature Extraction
+            try:
+                batch_dino = self.engine.extract_dino_batch(crops)
+            except Exception as e:
+                print(f"⚠️ DINO Error: {e}")
                 return
 
-            # 2. Crop & Scale Coordinates
-            sx = CFG.DISPLAY_SIZE[0] / CFG.AI_SIZE
-            sy = CFG.DISPLAY_SIZE[1] / CFG.AI_SIZE
+            # 4. Global Search
+            sim_matrix = np.dot(batch_dino, self.active_vectors)
             
-            crops = []
-            box_coords = []
-            
-            h_orig, w_orig = frame.shape[:2]
-
-            for box in res.boxes:
-                # .xyxy[0] ใช้งานได้เหมือนเดิมไม่ว่าจะเป็น PT หรือ ONNX
-                x1, y1, x2, y2 = box.xyxy[0].cpu().int().tolist() # เพิ่ม .cpu() กันเหนียวเผื่อรัน GPU
+            for i, _ in enumerate(crops):
+                best_idx = np.argmax(sim_matrix[i])
+                score = sim_matrix[i][best_idx]
+                matched_name = self.active_names[best_idx]
                 
-                # Scale coordinates
-                dx1, dy1 = int(x1 * sx), int(y1 * sy)
-                dx2, dy2 = int(x2 * sx), int(y2 * sy)
+                display_name = "Unknown"
+                is_correct = False
                 
-                # Clamp coordinates
-                dx1, dy1 = max(0, dx1), max(0, dy1)
-                dx2, dy2 = min(w_orig, dx2), min(h_orig, dy2)
-                
-                crop = frame[dy1:dy2, dx1:dx2]
-                
-                if crop.size > 0: 
-                    crops.append(crop)
-                    box_coords.append([dx1, dy1, dx2, dy2])
-
-            temp_results = []
-            if crops:
-                # 3. DINO Feature Extraction
-                try:
-                    batch_dino = self.engine.extract_dino_batch(crops)
-                except Exception as e:
-                    print(f"⚠️ DINO Error: {e}")
-                    return
-
-                # 4. Global Search
-                sim_matrix = np.dot(batch_dino, self.active_vectors)
-                
-                for i, _ in enumerate(crops):
-                    best_idx = np.argmax(sim_matrix[i])
-                    score = sim_matrix[i][best_idx]
-                    matched_name = self.active_names[best_idx]
+                # 5. Verification Logic
+                if score > CFG.VERIFY_THRESHOLD:
+                    is_correct = self.rx.verify(matched_name)
                     
-                    display_name = "Unknown"
-                    is_correct = False
-                    
-                    # 5. Verification Logic
-                    if score > CFG.VERIFY_THRESHOLD:
-                        is_correct = self.rx.verify(matched_name)
-                        
-                        if is_correct:
-                            display_name = self.rx.target_drugs[normalize_name(matched_name)]['original']
-                            if self.timer_running:
-                                elapsed = time.time() - self.timer_start_time
-                                self.timer_result_text = f"{display_name} : {elapsed:.2f}s"
-                                self.timer_running = False
-                        else:
-                            display_name = matched_name.upper()
+                    if is_correct:
+                        display_name = self.rx.target_drugs[normalize_name(matched_name)]['original']
+                        if self.timer_running:
+                            elapsed = time.time() - self.timer_start_time
+                            self.timer_result_text = f"{display_name} : {elapsed:.2f}s"
+                            self.timer_running = False
                     else:
-                        display_name = f"? ({score:.2f})"
+                        display_name = matched_name.upper()
+                else:
+                    display_name = f"? ({score:.2f})"
 
-                    temp_results.append({
-                        'box': box_coords[i], 
-                        'label': display_name, 
-                        'conf': score,
-                        'is_correct': is_correct
-                    })
+                temp_results.append({
+                    'box': box_coords[i], 
+                    'label': display_name, 
+                    'conf': score,
+                    'is_correct': is_correct
+                })
 
-            # 6. Update Shared Results
-            with self.lock:
-                self.results = temp_results
+        # 6. Update Shared Results
+        with self.lock:
+            self.results = temp_results
