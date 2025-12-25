@@ -5,6 +5,7 @@ import os
 import cv2
 import numpy as np
 from ultralytics import YOLO
+from rapidocr_onnxruntime import RapidOCR # <--- [NEW] 1. Import OCR
 from src.utils.config import CFG
 from src.utils.helpers import normalize_name
 from src.ai.engine import FeatureEngine
@@ -27,13 +28,16 @@ class AIProcessor:
             # -----------------------------------------------------------
             # [MODEL LOADING]
             # -----------------------------------------------------------
-            print(f"⏳ Loading Model from {CFG.MODEL_PACK}...")
-            
-            # [IMPORTANT] ใช้ task='segment' เพราะโมเดลคุณชื่อ seg_...
-            # ถ้าใช้ detect กับโมเดล seg มันจะ error หรือค่าเพี้ยนได้
+            print(f"⏳ Loading YOLO Model from {CFG.MODEL_PACK}...")
             self.yolo = YOLO(CFG.MODEL_PACK, task='segment') 
-            
-            print(f"✅ Model Loaded successfully! (Source: {CFG.MODEL_PACK})") 
+            print(f"✅ YOLO Loaded!") 
+
+            # -----------------------------------------------------------
+            # [NEW] 2. LOAD OCR ENGINE
+            # -----------------------------------------------------------
+            print(f"⏳ Loading RapidOCR Engine...")
+            self.ocr = RapidOCR()
+            print(f"✅ OCR Loaded!")
             
             # State Variables
             self.latest_frame = None
@@ -94,19 +98,16 @@ class AIProcessor:
             time.sleep(0.01)
 
     def process(self, frame: np.ndarray):
-        # เริ่มจับเวลา Total
         t0 = time.perf_counter()
         
-        # ตัวแปรเก็บเวลา (ms)
         yolo_ms = 0
         dino_ms = 0
         search_ms = 0
+        ocr_ms = 0 # <--- เก็บเวลา OCR ด้วย
 
-        # 0. Safety Checks
         if not self.rx.is_ready or self.rx.is_completed: return
         if self.active_vectors is None: return
 
-        # Handle Alpha Channel
         if frame.shape[2] == 4:
             frame = frame[:, :, :3]
 
@@ -115,24 +116,16 @@ class AIProcessor:
         # ==========================================
         t_start_yolo = time.perf_counter()
 
-        # Resize
         img_resized = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE))
-        
-        # [FIX ONNX] Convert BGR to RGB (ONNX ชอบ RGB มากกว่า)
         img_input = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
         
-        # Predict (Lower conf to 0.25 to ensure detection)
         results = self.yolo(img_input, conf=0.25, verbose=False)
         res = results[0]
         
         yolo_ms = (time.perf_counter() - t_start_yolo) * 1000
 
-        # Check Empty
         if res.boxes is None or len(res.boxes) == 0:
             with self.lock: self.results = []
-            # Log แม้จะไม่เจอของ เพื่อเช็คว่าโมเดลวิ่งเท่าไหร่
-            total_ms = (time.perf_counter() - t0) * 1000
-            print(f"⚡ [Speed] YOLO: {yolo_ms:.1f}ms | Total: {total_ms:.1f}ms (No Obj)")
             return
 
         # 2. Crop & Scale
@@ -144,16 +137,12 @@ class AIProcessor:
         h_orig, w_orig = frame.shape[:2]
 
         for box in res.boxes:
-            # [FIX ONNX] Robust Coordinate Extraction
-            # ใช้ .cpu().numpy() แล้ว cast int เอง ปลอดภัยที่สุด
             coords = box.xyxy[0].cpu().numpy().astype(int)
             x1, y1, x2, y2 = coords
             
-            # Scale coordinates
             dx1, dy1 = int(x1 * sx), int(y1 * sy)
             dx2, dy2 = int(x2 * sx), int(y2 * sy)
             
-            # Clamp coordinates
             dx1, dy1 = max(0, dx1), max(0, dy1)
             dx2, dy2 = min(w_orig, dx2), min(h_orig, dy2)
             
@@ -180,21 +169,23 @@ class AIProcessor:
             # ⏱️ 3. Vector Search & Logic
             # ==========================================
             t_start_search = time.perf_counter()
-            
             sim_matrix = np.dot(batch_dino, self.active_vectors)
-            
-            for i, _ in enumerate(crops):
+            search_ms = (time.perf_counter() - t_start_search) * 1000
+
+            # เริ่ม Loop Match ผลลัพธ์
+            for i, crop_img in enumerate(crops): # <--- [IMPORTANT] เปลี่ยน _ เป็น crop_img เพื่อเอาภาพมาใช้
+                
+                # --- A. Vector Match ---
                 best_idx = np.argmax(sim_matrix[i])
                 score = sim_matrix[i][best_idx]
                 matched_name = self.active_names[best_idx]
                 
+                # --- B. Logic เดิม ---
                 display_name = "Unknown"
                 is_correct = False
                 
-                # Verification Logic
                 if score > CFG.VERIFY_THRESHOLD:
                     is_correct = self.rx.verify(matched_name)
-                    
                     if is_correct:
                         display_name = self.rx.target_drugs[normalize_name(matched_name)]['original']
                         if self.timer_running:
@@ -206,14 +197,44 @@ class AIProcessor:
                 else:
                     display_name = f"? ({score:.2f})"
 
+                # ==========================================
+                # 📖 [NEW] C. OCR LOGGING (DEBUG MODE)
+                # ==========================================
+                # ทำเฉพาะตอนที่ Crop มีขนาดพอสมควร (เล็กไปอ่านไม่ออกเปลืองแรง)
+                if crop_img.shape[0] > 20 and crop_img.shape[1] > 20:
+                    try:
+                        t_ocr_start = time.perf_counter()
+                        
+                        # 1. Preprocess (Gray + CLAHE)
+                        gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
+                        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+                        enhanced_crop = clahe.apply(gray)
+                        
+                        # 2. Run OCR
+                        ocr_res, _ = self.ocr(enhanced_crop)
+                        
+                        ocr_time = (time.perf_counter() - t_ocr_start) * 1000
+                        ocr_ms += ocr_time
+
+                        # 3. Print Log
+                        if ocr_res:
+                            print(f"   🔍 [OCR] Pill #{i} ({matched_name}):")
+                            for item in ocr_res:
+                                text, conf = item[1], item[2]
+                                if conf > 0.5: # กรองพวกมั่วๆ ออก
+                                    print(f"      👉 Text: '{text}' (Conf: {conf:.2f})")
+                                    
+                    except Exception as e:
+                        print(f"   ❌ OCR Err: {e}")
+                
+                # --- End OCR ---
+
                 temp_results.append({
                     'box': box_coords[i], 
                     'label': display_name, 
                     'conf': score,
                     'is_correct': is_correct
                 })
-            
-            search_ms = (time.perf_counter() - t_start_search) * 1000
 
         # 6. Update Shared Results
         with self.lock:
@@ -223,4 +244,5 @@ class AIProcessor:
         # 📊 LOG SPEED
         # ==========================================
         total_ms = (time.perf_counter() - t0) * 1000
-        print(f"⚡ [Speed] YOLO: {yolo_ms:.1f}ms | DINO: {dino_ms:.1f}ms | Search: {search_ms:.1f}ms | Total: {total_ms:.1f}ms")
+        # เพิ่ม OCR ms ใน Log จะได้รู้ว่ากินแรงแค่ไหน
+        print(f"⚡ [Speed] YOLO: {yolo_ms:.0f}ms | DINO: {dino_ms:.0f}ms | OCR: {ocr_ms:.0f}ms | Total: {total_ms:.0f}ms")

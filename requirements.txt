@@ -25,3 +25,4 @@ onnx
 opencv-python-headless
 flask
 onnxscript
+rapidocr-onnxruntime
