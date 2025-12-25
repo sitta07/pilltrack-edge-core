@@ -1,31 +1,40 @@
 import os
 from ultralytics import YOLO
 
-# 1. ระบุ Path ของไฟล์ .pt
-model_path = "models/seg_best_process.pt"
+# 1. หาตำแหน่ง Root ของโปรเจกต์แบบ Auto
+# หา path ของไฟล์นี้ (scripts/convert.py)
+current_script_path = os.path.abspath(__file__)
+# ถอยออกมา 1 ชั้นเพื่อเจอ folder 'scripts'
+script_dir = os.path.dirname(current_script_path)
+# ถอยอีก 1 ชั้นเพื่อเจอ 'Project_Root'
+project_root = os.path.dirname(script_dir)
 
-# เช็คก่อนว่าไฟล์มีอยู่จริงไหม
+# 2. ประกอบร่าง Path ไปหาไฟล์โมเดล
+# มันจะกลายเป็น: .../Project_Root/models/seg_best_process.pt
+model_path = os.path.join(project_root, 'models', 'seg_best_process.pt')
+
+print(f"📍 Script location: {script_dir}")
+print(f"🎯 Target Model Path: {model_path}")
+
+# เช็คความชัวร์ก่อนรัน
 if not os.path.exists(model_path):
-    print(f"❌ ไม่เจอไฟล์ที่: {model_path}")
-    print("👉 ตรวจสอบว่าโฟลเดอร์ 'models' และไฟล์ถูกต้องนะครับ")
+    print(f"\n❌ Error: หาไฟล์โมเดลไม่เจอที่: {model_path}")
+    print("👉 ลองเช็คชื่อไฟล์ หรือโครงสร้าง Folder อีกทีนะครับ")
     exit()
 
-print(f"🚀 Loading model from: {model_path}")
+# 3. โหลดและ Export
+print(f"\n🚀 Loading model...")
 model = YOLO(model_path)
 
 print("📦 Exporting to ONNX...")
-
-# 2. สั่ง Export
-# imgsz=640 : ควรตั้งให้ตรงกับ CFG.AI_SIZE ในโค้ดรันจริงของคุณ
-# simplify=True : ช่วยลดขนาดไฟล์และทำให้รันเร็วขึ้น
-path = model.export(
+output_path = model.export(
     format="onnx",
-    imgsz=640,
+    imgsz=640,       # ตั้งให้ตรงกับที่ใช้จริง (เช่น 640)
     opset=12,
     simplify=True
 )
 
 print("-" * 50)
-print(f"✅ Export เสร็จสมบูรณ์!")
-print(f"📂 ไฟล์ ONNX อยู่ที่: {path}")
+print(f"✅ Export เสร็จเรียบร้อย!")
+print(f"📂 ไฟล์ ONNX ถูกเซฟไว้ที่: {output_path}")
 print("-" * 50)
