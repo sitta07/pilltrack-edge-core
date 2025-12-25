@@ -7,73 +7,89 @@ from src.utils.config import CFG
 
 class FeatureEngine:
     def __init__(self):
-        # ใช้ CFG.AI_SIZE ตามที่คุณต้องการ (เช่น 336)
-        print(f"⏳ Loading DINOv2 (Target Input: {CFG.AI_SIZE}x{CFG.AI_SIZE})...")
+        # ใช้ขนาดจาก Config ให้ตรงกับตอน Export
+        self.input_size = CFG.AI_SIZE
+        
+        print(f"⏳ Loading DINOv2 ONNX (Input: {self.input_size}x{self.input_size})...")
+        
         try:
+            # path ไฟล์โมเดล (ต้องตรงกับที่ Export มา)
             model_path = "models/dinov2_vitb14.onnx"
+            
             if not os.path.exists(model_path):
                 print(f"⚠️ Warning: Model not found at {model_path}")
 
-            # Load ONNX model
+            # 1. Load ONNX Runtime
+            # providers=['CUDAExecutionProvider', 'CPUExecutionProvider'] # ถ้ามี GPU ให้ใส่ CUDA นำหน้า
             self.sess = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+            
+            # ดึงชื่อ Input node จากโมเดล (กันพลาด)
             self.input_name = self.sess.get_inputs()[0].name
             
-            # Print debug info
-            print(f"✅ DINOv2 Loaded! Input Name: {self.input_name}")
+            print(f"✅ DINOv2 Engine Ready! (Batch Support Enabled)")
             
-            # Pre-calculate Constants for Speed (ImageNet Mean/Std)
-            # Shape (1, 1, 3) เพื่อให้ Broadcast กับภาพ (H, W, 3) ได้เลย
+            # 2. Pre-calculate Constants (ImageNet Mean/Std)
+            # เตรียม shape (1, 1, 3) เพื่อให้ Broadcast กับภาพได้เร็วๆ
             self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(1, 1, 3)
             self.std = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3)
             
         except Exception as e:
-            print(f"❌ Error loading DINO ONNX: {e}")
+            print(f"❌ Error loading DINO Engine: {e}")
             self.sess = None
             
     def preprocess_batch(self, crop_list: List[np.ndarray]) -> np.ndarray:
-        # 1. จองพื้นที่หน่วยความจำรอไว้เลย (Batch Size, 3, H, W)
-        # ใช้ CFG.AI_SIZE ตรงนี้ตาม request
-        batch = np.zeros((len(crop_list), 3, CFG.AI_SIZE, CFG.AI_SIZE), dtype=np.float32)
+        """
+        แปลง List ของภาพ (BGR) เป็น Numpy Batch (N, 3, H, W) ที่ Normalize แล้ว
+        """
+        num_imgs = len(crop_list)
+        
+        # จอง Memory ทีเดียว (Batch Size, 3, H, W)
+        batch = np.zeros((num_imgs, 3, self.input_size, self.input_size), dtype=np.float32)
         
         for i, img in enumerate(crop_list):
-            # Resize
-            img_resized = cv2.resize(img, (CFG.AI_SIZE, CFG.AI_SIZE), interpolation=cv2.INTER_LINEAR)
+            # 1. Resize ให้ตรงกับ model input
+            img_resized = cv2.resize(img, (self.input_size, self.input_size), interpolation=cv2.INTER_LINEAR)
             
-            # Convert BGR -> RGB (DINO ต้องการ RGB)
+            # 2. Convert BGR -> RGB (DINO ต้องใช้ RGB)
             img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
             
-            # Normalize (0-1)
+            # 3. Normalize (0-1)
             img_norm = img_rgb.astype(np.float32) / 255.0
             
-            # Standardize (ImageNet stats)
+            # 4. Standardize (ImageNet stats) -> (Pixel - Mean) / Std
             img_norm = (img_norm - self.mean) / self.std
             
-            # HWC -> CHW (Transpose)
+            # 5. Transpose HWC -> CHW (3, H, W)
             batch[i] = img_norm.transpose(2, 0, 1)
             
         return batch
 
     def extract_dino_batch(self, crop_list: List[np.ndarray]) -> np.ndarray:
-        if not crop_list or self.sess is None: return np.array([])
+        """
+        รัน Inference ทีเดียวทั้ง Batch (เร็วที่สุด)
+        """
+        if not crop_list or self.sess is None: 
+            return np.array([])
         
         try:
-            # ⚡ 1. Preprocess ทีเดียวทั้ง Batch
+            # ⚡ 1. Preprocess รวดเดียว
             batch_input = self.preprocess_batch(crop_list)
             
-            # ⚡ 2. ONNX Runtime Inference (จุดสำคัญที่ทำให้เร็ว!)
-            # ส่งไปคำนวณรอบเดียวจบ ไม่วนลูป run() แล้ว
+            # ⚡ 2. ONNX Runtime Inference (One Shot)
+            # ส่งไปคำนวณรอบเดียวจบ ไม่ต้องวน Loop แล้ว เพราะโมเดลรองรับ Dynamic Batch
             outputs = self.sess.run(None, {self.input_name: batch_input})
             
-            # DINO Output shape: (Batch_Size, Embed_Dim)
+            # Output Shape: (Batch_Size, Embed_Dim) เช่น (10, 768)
             embeddings = outputs[0]
 
             # 3. L2 Normalization (Vectorized)
-            # สำคัญมากสำหรับการทำ Search ด้วย Dot Product
+            # ทำให้ Vector เป็น Unit Vector เพื่อให้ Dot Product = Cosine Similarity
             norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
             embeddings = embeddings / (norms + 1e-6)
             
             return embeddings
 
         except Exception as e:
-            print(f"❌ Inference Error: {e}")
+            print(f"❌ DINO Inference Error: {e}")
+            # ถ้า Batch ใหญ่ไปจนเมมเต็ม อาจต้อง fallback ไปทำทีละรูป (แต่ปกติ Text/Image ไม่ค่อยเต็มง่ายๆ)
             return np.array([])
