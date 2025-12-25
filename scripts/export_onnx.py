@@ -1,24 +1,31 @@
+import os
 from ultralytics import YOLO
 
-# --- Config ---
-MODEL_PATH = "models/seg_best_process.pt"  # เปลี่ยนเป็น path ไฟล์ .pt ของคุณ
-EXPORT_SIZE = 640       # ควรตรงกับ CFG.AI_SIZE ในโค้ดรันจริง (เช่น 320, 416, 640)
+# 1. ระบุ Path ของไฟล์ .pt
+model_path = "models/seg_best_process.pt"
 
-def main():
-    print(f"🚀 Loading model: {MODEL_PATH}...")
-    model = YOLO(MODEL_PATH)
+# เช็คก่อนว่าไฟล์มีอยู่จริงไหม
+if not os.path.exists(model_path):
+    print(f"❌ ไม่เจอไฟล์ที่: {model_path}")
+    print("👉 ตรวจสอบว่าโฟลเดอร์ 'models' และไฟล์ถูกต้องนะครับ")
+    exit()
 
-    print("📦 Starting Export to ONNX...")
-    
-    path = model.export(
-        format="onnx",
-        imgsz=EXPORT_SIZE,
-        opset=12,
-        simplify=True
-    )
+print(f"🚀 Loading model from: {model_path}")
+model = YOLO(model_path)
 
-    print(f"✅ Export Completed! Saved at: {path}")
-    print(f"💡 Tip: อย่าลืมไปแก้ CFG.MODEL_PACK ในโค้ดหลักให้ชี้มาที่ไฟล์นี้นะครับ")
+print("📦 Exporting to ONNX...")
 
-if __name__ == "__main__":
-    main()
+# 2. สั่ง Export
+# imgsz=640 : ควรตั้งให้ตรงกับ CFG.AI_SIZE ในโค้ดรันจริงของคุณ
+# simplify=True : ช่วยลดขนาดไฟล์และทำให้รันเร็วขึ้น
+path = model.export(
+    format="onnx",
+    imgsz=640,
+    opset=12,
+    simplify=True
+)
+
+print("-" * 50)
+print(f"✅ Export เสร็จสมบูรณ์!")
+print(f"📂 ไฟล์ ONNX อยู่ที่: {path}")
+print("-" * 50)
