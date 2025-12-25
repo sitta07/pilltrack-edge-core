@@ -6,7 +6,7 @@ display:
   height: 720
 
 artifacts:
-  model: 'models/seg_best_process.pt'
+  model: 'models/seg_best_process.onnx'
   pack_vec: 'database/pill_fingerprints.pkl'
   drug_list: 'database/drug_list.json'
 
