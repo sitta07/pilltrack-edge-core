@@ -24,8 +24,17 @@ class AIProcessor:
             self._load_vector_db()
             self._prepare_search_space()
             
-            print(f"⏳ Loading YOLO from {CFG.MODEL_PACK}...")
-            self.yolo = YOLO(CFG.MODEL_PACK)
+            # --- [MODIFIED] Loading Model Logic ---
+            print(f"⏳ Loading Detection Model from {CFG.MODEL_PACK}...")
+            
+            # task='detect' สำคัญมากสำหรับ ONNX เพื่อให้ Library รู้ว่าจะเตรียม Output แบบไหน
+            self.yolo = YOLO(CFG.MODEL_PACK, task='detect') 
+            
+            # Warmup (Optional): รันภาพเปล่า 1 ครั้ง เพื่อให้ ONNX Runtime โหลด Provider รอไว้เลย
+            # dummy_img = np.zeros((CFG.AI_SIZE, CFG.AI_SIZE, 3), dtype=np.uint8)
+            # self.yolo(dummy_img, verbose=False)
+            
+            print(f"✅ Model Loaded successfully! (Source: {CFG.MODEL_PACK})") 
             
             # State Variables
             self.latest_frame = None
@@ -36,11 +45,9 @@ class AIProcessor:
             self.timer_running = False
             self.timer_start_time = 0
             self.timer_result_text = ""
-            print(f"⏳ Loading YOLO from {CFG.MODEL_PACK}...")
-            self.yolo = YOLO(CFG.MODEL_PACK)
-            print("✅ YOLO Loaded successfully!") 
+            
         except Exception as e:
-            print(f"❌ YOLO LOAD ERROR: {e}") # <--- เพิ่มบรรทัดนี้เพื่อดู Error จริงๆ
+            print(f"❌ MODEL LOAD ERROR: {e}")
             raise e
 
     def _load_vector_db(self):
@@ -98,10 +105,11 @@ class AIProcessor:
             # ---------------------------------------------------------
 
             # 1. YOLO Detect
-            # Resize ลงมาตาม config (เช่น 224x224 หรือ 640x640) เพื่อความเร็ว
+            # Resize ลงมาตาม config
             img_resized = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE))
             
-            # ส่งเข้า YOLO (verbose=False เพื่อไม่ให้รก Terminal)
+            # [MODIFIED] Inference
+            # Ultralytics จะจัดการ ONNX backend ให้เอง ได้ผลลัพธ์เป็น Results object เหมือนเดิมเป๊ะ
             res = self.yolo(img_resized, conf=CFG.CONF_THRESHOLD, verbose=False)[0]
 
             if res.boxes is None or len(res.boxes) == 0:
@@ -109,27 +117,26 @@ class AIProcessor:
                 return
 
             # 2. Crop & Scale Coordinates
-            # ต้องคำนวณ Scale กลับไปเป็นขนาดหน้าจอ Display (1280x720)
             sx = CFG.DISPLAY_SIZE[0] / CFG.AI_SIZE
             sy = CFG.DISPLAY_SIZE[1] / CFG.AI_SIZE
             
             crops = []
             box_coords = []
             
-            h_orig, w_orig = frame.shape[:2] # ขนาดภาพต้นฉบับหลังตัด Alpha
+            h_orig, w_orig = frame.shape[:2]
 
             for box in res.boxes:
-                x1, y1, x2, y2 = box.xyxy[0].int().tolist()
+                # .xyxy[0] ใช้งานได้เหมือนเดิมไม่ว่าจะเป็น PT หรือ ONNX
+                x1, y1, x2, y2 = box.xyxy[0].cpu().int().tolist() # เพิ่ม .cpu() กันเหนียวเผื่อรัน GPU
                 
-                # Scale coordinates back to original frame size for display
+                # Scale coordinates
                 dx1, dy1 = int(x1 * sx), int(y1 * sy)
                 dx2, dy2 = int(x2 * sx), int(y2 * sy)
                 
-                # Clamp coordinates (กันหลุดขอบภาพ)
+                # Clamp coordinates
                 dx1, dy1 = max(0, dx1), max(0, dy1)
                 dx2, dy2 = min(w_orig, dx2), min(h_orig, dy2)
                 
-                # ตัดภาพจาก Frame ต้นฉบับ (ที่ชัดกว่า) เพื่อส่งไปเข้า DINO
                 crop = frame[dy1:dy2, dx1:dx2]
                 
                 if crop.size > 0: 
@@ -139,15 +146,16 @@ class AIProcessor:
             temp_results = []
             if crops:
                 # 3. DINO Feature Extraction
-                # แปลงภาพ Crop เป็น Vector
-                batch_dino = self.engine.extract_dino_batch(crops)
-                
-                # 4. Global Search (Dot Product Similarity)
-                # เอา Vector ที่ได้ ไปเทียบกับ Database ทั้งหมด
+                try:
+                    batch_dino = self.engine.extract_dino_batch(crops)
+                except Exception as e:
+                    print(f"⚠️ DINO Error: {e}")
+                    return
+
+                # 4. Global Search
                 sim_matrix = np.dot(batch_dino, self.active_vectors)
                 
                 for i, _ in enumerate(crops):
-                    # หาตัวที่เหมือนที่สุด (Max Score)
                     best_idx = np.argmax(sim_matrix[i])
                     score = sim_matrix[i][best_idx]
                     matched_name = self.active_names[best_idx]
@@ -157,23 +165,17 @@ class AIProcessor:
                     
                     # 5. Verification Logic
                     if score > CFG.VERIFY_THRESHOLD:
-                        # เช็คกับใบสั่งยา (Business Logic)
                         is_correct = self.rx.verify(matched_name)
                         
                         if is_correct:
-                            # ถ้าถูกต้อง ให้ดึงชื่อจริงจาก Database มาโชว์
                             display_name = self.rx.target_drugs[normalize_name(matched_name)]['original']
-                            
-                            # Stop Timer check (ถ้าจับเวลาอยู่)
                             if self.timer_running:
                                 elapsed = time.time() - self.timer_start_time
                                 self.timer_result_text = f"{display_name} : {elapsed:.2f}s"
                                 self.timer_running = False
                         else:
-                            # เจอยาใน DB แต่ไม่ใช่ยาที่สั่ง
                             display_name = matched_name.upper()
                     else:
-                        # Score ต่ำเกินไป ไม่มั่นใจ
                         display_name = f"? ({score:.2f})"
 
                     temp_results.append({
@@ -183,6 +185,6 @@ class AIProcessor:
                         'is_correct': is_correct
                     })
 
-            # 6. Update Shared Results (Thread Safe)
+            # 6. Update Shared Results
             with self.lock:
                 self.results = temp_results

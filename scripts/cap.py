@@ -194,3 +194,4 @@ if __name__ == "__main__":
     
     print(f"🚀 Web Collector Ready -> http://0.0.0.0:{PORT}")
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
+
