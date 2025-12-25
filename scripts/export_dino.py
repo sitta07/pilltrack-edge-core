@@ -75,7 +75,7 @@ def export_model():
             dummy_input, 
             output_file,
             export_params=True, 
-            opset_version=17,        # แนะนำ 17 สำหรับ Transformer ยุคใหม่
+            opset_version=12,        # แนะนำ 17 สำหรับ Transformer ยุคใหม่
             do_constant_folding=True,
             input_names=['input'],
             output_names=['output'],
