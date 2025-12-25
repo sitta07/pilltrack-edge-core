@@ -24,10 +24,13 @@ class AIProcessor:
             self._load_vector_db()
             self._prepare_search_space()
             
-            # --- [MODIFIED] Loading Model Logic ---
-            print(f"⏳ Loading Detection Model from {CFG.MODEL_PACK}...")
+            # -----------------------------------------------------------
+            # [MODEL LOADING]
+            # -----------------------------------------------------------
+            print(f"⏳ Loading Model from {CFG.MODEL_PACK}...")
             
-            # task='detect' สำคัญมากสำหรับ ONNX เพื่อให้ Library รู้ว่าจะเตรียม Output แบบไหน
+            # [IMPORTANT] ใช้ task='segment' เพราะโมเดลคุณชื่อ seg_...
+            # ถ้าใช้ detect กับโมเดล seg มันจะ error หรือค่าเพี้ยนได้
             self.yolo = YOLO(CFG.MODEL_PACK, task='segment') 
             
             print(f"✅ Model Loaded successfully! (Source: {CFG.MODEL_PACK})") 
@@ -91,48 +94,58 @@ class AIProcessor:
             time.sleep(0.01)
 
     def process(self, frame: np.ndarray):
+        # เริ่มจับเวลา Total
+        t0 = time.perf_counter()
+        
+        # ตัวแปรเก็บเวลา (ms)
+        yolo_ms = 0
+        dino_ms = 0
+        search_ms = 0
+
         # 0. Safety Checks
         if not self.rx.is_ready or self.rx.is_completed: return
         if self.active_vectors is None: return
 
-        # ---------------------------------------------------------
         # Handle Alpha Channel
         if frame.shape[2] == 4:
-            frame = frame[:, :, :3]  # ตัดช่อง Alpha ทิ้งไป
-        # ---------------------------------------------------------
+            frame = frame[:, :, :3]
 
-        # 1. Prepare Image for YOLO
-        # Resize ลงมาตาม config
+        # ==========================================
+        # ⏱️ 1. YOLO Inference
+        # ==========================================
+        t_start_yolo = time.perf_counter()
+
+        # Resize
         img_resized = cv2.resize(frame, (CFG.AI_SIZE, CFG.AI_SIZE))
         
-        # [FIX 1] Force RGB Conversion
-        # ONNX มักจะต้องการ RGB เป๊ะๆ เพื่อให้ Detect เจอ (OpenCV default คือ BGR)
+        # [FIX ONNX] Convert BGR to RGB (ONNX ชอบ RGB มากกว่า)
         img_input = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
-
-        # [FIX 2] Inference with Lower Threshold & Debug
-        # ลด conf ลงเหลือ 0.25 เพื่อดูว่า ONNX เจออะไรบ้างไหม (ONNX บางที score ดรอปกว่า pt)
+        
+        # Predict (Lower conf to 0.25 to ensure detection)
         results = self.yolo(img_input, conf=0.25, verbose=False)
         res = results[0]
+        
+        yolo_ms = (time.perf_counter() - t_start_yolo) * 1000
 
-        # [DEBUG] ปริ้นท์บอกถ้าไม่เจออะไรเลย (Uncomment เพื่อ Debug)
+        # Check Empty
         if res.boxes is None or len(res.boxes) == 0:
-            # print("DEBUG: No boxes detected") 
             with self.lock: self.results = []
+            # Log แม้จะไม่เจอของ เพื่อเช็คว่าโมเดลวิ่งเท่าไหร่
+            total_ms = (time.perf_counter() - t0) * 1000
+            print(f"⚡ [Speed] YOLO: {yolo_ms:.1f}ms | Total: {total_ms:.1f}ms (No Obj)")
             return
 
-        # 2. Crop & Scale Coordinates
+        # 2. Crop & Scale
         sx = CFG.DISPLAY_SIZE[0] / CFG.AI_SIZE
         sy = CFG.DISPLAY_SIZE[1] / CFG.AI_SIZE
         
         crops = []
         box_coords = []
-        
         h_orig, w_orig = frame.shape[:2]
 
         for box in res.boxes:
-            # [FIX 3] Robust Coordinate Extraction
-            # ใช้ .cpu().numpy() แล้ว cast int เอง ปลอดภัยที่สุดสำหรับ ONNX Output
-            # (ดีกว่า .int().tolist() ที่อาจเพี้ยนกับบาง backend)
+            # [FIX ONNX] Robust Coordinate Extraction
+            # ใช้ .cpu().numpy() แล้ว cast int เอง ปลอดภัยที่สุด
             coords = box.xyxy[0].cpu().numpy().astype(int)
             x1, y1, x2, y2 = coords
             
@@ -152,14 +165,22 @@ class AIProcessor:
 
         temp_results = []
         if crops:
-            # 3. DINO Feature Extraction
+            # ==========================================
+            # ⏱️ 2. DINO Feature Extraction
+            # ==========================================
+            t_start_dino = time.perf_counter()
             try:
                 batch_dino = self.engine.extract_dino_batch(crops)
             except Exception as e:
                 print(f"⚠️ DINO Error: {e}")
                 return
+            dino_ms = (time.perf_counter() - t_start_dino) * 1000
 
-            # 4. Global Search
+            # ==========================================
+            # ⏱️ 3. Vector Search & Logic
+            # ==========================================
+            t_start_search = time.perf_counter()
+            
             sim_matrix = np.dot(batch_dino, self.active_vectors)
             
             for i, _ in enumerate(crops):
@@ -170,7 +191,7 @@ class AIProcessor:
                 display_name = "Unknown"
                 is_correct = False
                 
-                # 5. Verification Logic
+                # Verification Logic
                 if score > CFG.VERIFY_THRESHOLD:
                     is_correct = self.rx.verify(matched_name)
                     
@@ -191,7 +212,15 @@ class AIProcessor:
                     'conf': score,
                     'is_correct': is_correct
                 })
+            
+            search_ms = (time.perf_counter() - t_start_search) * 1000
 
         # 6. Update Shared Results
         with self.lock:
             self.results = temp_results
+
+        # ==========================================
+        # 📊 LOG SPEED
+        # ==========================================
+        total_ms = (time.perf_counter() - t0) * 1000
+        print(f"⚡ [Speed] YOLO: {yolo_ms:.1f}ms | DINO: {dino_ms:.1f}ms | Search: {search_ms:.1f}ms | Total: {total_ms:.1f}ms")
