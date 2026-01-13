@@ -1,4 +1,4 @@
-# 🧪 PillTrack: Research Prototype (DINOv2 Implementation)
+# PillTrack: Research Prototype (DINOv2 Implementation)
 
 > [!WARNING]
 > **ARCHIVED REPOSITORY** > This project represents the **experimental phase** utilizing **DINOv2 (Vision Transformers)** for pill embedding.  
