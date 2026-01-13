@@ -1,4 +1,8 @@
-# PillTrack Edge
+# 🧪 PillTrack: Research Prototype (DINOv2 Implementation)
+
+> [!WARNING]
+> **ARCHIVED REPOSITORY** > This project represents the **experimental phase** utilizing **DINOv2 (Vision Transformers)** for pill embedding.  
+> **For the Production System (YOLO + ArcFace + MLOps), please visit:** [👉 https://github.com/sitta07/pilltrack-core.git]
 
 ![Status](https://img.shields.io/badge/Status-Beta-yellow?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Mini_PC_x86-0078D7?style=flat-square&logo=linux)
@@ -12,15 +16,22 @@ Designed to run efficiently on **ARM-based Edge Devices** (Raspberry Pi) with au
 
 ---
 
-## System Architecture
+**Why did we move to the new version?**
+While DINOv2 provides excellent zero-shot features, the production version (see link above) migrated to **ArcFace** to optimize for:
+1.  **Lower Latency** on Edge Devices (Raspberry Pi/Jetson).
+2.  **Specific Fine-tuning** on local pharmaceutical datasets.
+3.  **Green Screen** noise handling.
+
+---
+
+## System Architecture (Legacy)
 
 The system operates on a retrieval-based pipeline:
 
-1.  **Acquisition:** Captures frames via **USB Webcam** using OpenCV (Multithreaded).
-2.  **Detection:** YOLOv8 (Nano/Small) localizes pill instances in the frame.
-3.  **Embedding:** Cropped instances are processed by **DINOv2 (ViT-B/14)** via ONNX Runtime to generate vector embeddings.
-4.  **Identification:** Vectors are compared against a local vector database using Cosine Similarity.
-5.  **Verification:** Business logic validates identified pills against the active patient prescription (Mock/HIS).
+1.  **Acquisition:** Captures frames via **USB Webcam** using OpenCV.
+2.  **Detection:** YOLOv8 (Nano/Small) localizes pill instances.
+3.  **Embedding:** Cropped instances are processed by **DINOv2 (ViT-B/14)** via ONNX Runtime.
+4.  **Identification:** Vectors are compared against a local vector database (Cosine Similarity).
 
 ---
 
